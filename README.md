@@ -1,43 +1,70 @@
-**agent-cli** is a one-shot command-line helper that has scoped execution tasks, runs in the foreground, shows you what it's doing, uses isolation and unix-style primitives, and supports things like macros.
+# agent-cli
 
-Here's some differences:
+**agent-cli** is a one-shot command-line helper that automates scoped execution tasks. It runs in the foreground, provides clear visual feedback of its progress, uses isolation via symlinked tools, and learns new capabilities ("skills") through successful task execution.
 
-The path it uses for the tools it has access to are always observable symlinks in a config directory (defaults to .config/agent-cli/tools/{task}/bin). These start out with a very minimal set of things: whatis, apropos, man, pydoc in doc/bin, cat, head, tail and ls in find/bin. The agent will use these to find out what's installed on the system or what it needs to install. 
+## Core Concepts
 
-Each of these tools get classified by task.
+### Tool Isolation & Discovery
+Instead of accessing your entire system PATH, the agent uses a minimal set of tools symlinked in a config directory (defaults to `~/.config/agent-cli/tools/{category}/bin`).
 
-When the agent makes the plan about how to achieve its goal it uses these to try to execute it upon it. Each of these are stored in the agent-cli/skills directory and given a name. These are identical to Anthropic sklils and are completely substitutable
+- **Default Tools:** Starts with `whatis`, `apropos`, `man`, `pydoc` (for documentation/discovery) and `cat`, `head`, `tail`, `ls` (for basic inspection).
+- **Discovery:** When a task requires a new tool (e.g., `git`), the agent uses `whatis` or `apropos` to find it on your system and asks for permission to symlink it into its scoped environment.
+- **Classification:** Tools are automatically categorized into groups like `vcs`, `build`, `text`, `net`, `sys`, etc.
 
-Beyond this, the agent always has two choices:
-    
-    * write a program (stored in tools/)
-    * try to do the task without writing a tool
+### Skills (Learning)
+When the agent successfully completes a task, it automatically generalizes the plan and saves it as a **Skill** (stored in `~/.config/agent-cli/skills/`).
 
-Regardless if first sees if it has an appropriate skill it can leverage. If so it tries to use it.
+- **Parameterization:** Skills automatically extract variables (like URLs or file paths) from the task description using regex.
+- **Reuse:** The next time you ask for a similar task, the agent will recognize the pattern and apply the saved skill with new parameters.
+- **Reliability:** Skills track their success count, helping you identify the most reliable automated workflows.
 
-## Agent flow
+### Custom Programs
+If a task cannot be achieved with existing system tools, the agent can write a custom Python program (stored in `tools/custom/bin`) to handle the logic.
 
-In order to do a task here is what happens internally:
+---
 
-    1. The harness first looks at the current context in the current directory and creates a success condition for the task. This will allow it to make sure it's succeeded.
+## Agent Flow
 
-    2. It then looks at the current skills and sees if any apply.
+1.  **Success Condition:** Analyzes the task and current directory to define what "success" looks like (e.g., "a new directory named X exists").
+2.  **Skill Match:** Checks if any existing skill matches the task using regex patterns.
+3.  **Apply Skill:** If a match is found, it substitutes parameters and executes the saved plan.
+4.  **Plan Generation:** If no skill applies (or the skill fails to satisfy the success condition), the agent generates a new plan using a Large Language Model (LLM) or internal heuristics.
+5.  **Validation:** Before execution, it verifies all required tools are available and symlinked.
+6.  **Execution:** Steps through the plan, running tools and showing output.
+7.  **Verification & Learning:** Checks the success condition. If passed, it saves the plan as a new, reusable skill.
 
-    3. If so, it tries to apply the skill and see if it passes the test.
+---
 
-    4. Otherwise it tries to come up with a plan that uses the current tools.
+## Configuration
 
-    5. Before executing the plan it steps through it piece by piece trying to assess what happens. After step 1, X happens. Does this work us towards our goal, does this allow for the next step to happen? Is this destructive? 
+**agent-cli** is model and provider agnostic. It supports any OpenAI-compatible API.
 
-    6. If it passes these tests then, if it needs more tools it will ask the user to allow or install them. If not it will try to do the task.
+### Model Setup
+Set your API configuration using the `--set` command:
+```bash
+$ agent-cli --set model "gpt-4"
+$ agent-cli --set base_url "https://api.openai.com/v1"
+$ agent-cli --set key "your-api-key"
+```
 
-As a result you can do things like "clone these repositories: x, y, z" or "bump the z version number and do a new release"
+### One-shot Overrides
+You can override configuration for a single run:
+```bash
+$ agent-cli --model "claude-3" "clone this repo: https://github.com/user/repo"
+```
 
-## Model key configuration
+---
 
-agent-cli is model and provider agnostic. The configuration has a triplet, base_url, model, and key. These are all overridable on the command line and can be set via a set command like so:
+## Usage
 
-$ agent-cli --set model "model-name"
+### Examples
+- `agent-cli "clone github.com/akash-network/node as akash-node"`
+- `agent-cli "list all files in the current directory"`
+- `agent-cli "read the content of README.md"`
 
-Or like so for one-shot
-$ agent-cli --model "model-name" "task to do"
+### Management Commands
+- **List Skills:** `agent-cli --skills`
+- **Invalidate a Skill:** `agent-cli --invalidate <skill-name>` (prevents the agent from using it)
+- **Delete a Skill:** `agent-cli --delete <skill-name>`
+- **Auto-approve:** Use `-y` or `--yes` to skip confirmation prompts for symlinking tools.
+- **Status:** Running `agent-cli` without arguments shows the current tool and skill status.

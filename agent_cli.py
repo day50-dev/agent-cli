@@ -418,7 +418,7 @@ class AgentCLI:
 
         for step in plan:
             for arg in step.get("args", []):
-                if (arg in task
+                if (re.search(rf'\b{re.escape(arg)}\b', task)
                         and arg not in STATIC_COMMAND_WORDS
                         and not arg.startswith("-")
                         and len(arg) > 1
@@ -482,6 +482,8 @@ class AgentCLI:
             # Choose capture pattern based on value type
             if re.match(r'https?://', value):
                 parts.append(f"(?P<{name}>https?://\\S+)")
+            elif re.match(r'^\d+\.\d+', value):
+                parts.append(f"(?P<{name}>\\d+\\.\\d+(?:\\.\\d+)*)")
             else:
                 parts.append(f"(?P<{name}>\\S+)")
             last_end = idx + length
@@ -491,6 +493,43 @@ class AgentCLI:
             parts.append(re.escape(task[last_end:]))
 
         return "".join(parts)
+
+    def _parameterize_success_condition(self, condition: dict, params_map: dict[str, str]) -> dict:
+        """Replace concrete values in the success condition with {{param}} placeholders.
+
+        Only replaces values that appear in params_map (i.e., were also
+        parameterized in the plan), so the condition stays consistent
+        with the parameterized plan at apply-time.
+        """
+        param_condition = {}
+        for key, value in condition.items():
+            if isinstance(value, str):
+                # Replace any known parameter value with its placeholder
+                new_val = value
+                for orig, param_name in params_map.items():
+                    new_val = new_val.replace(orig, f"{{{{{param_name}}}}}")
+                param_condition[key] = new_val
+            elif isinstance(value, list):
+                param_condition[key] = [
+                    self._parameterize_success_condition_value(item, params_map)
+                    for item in value
+                ]
+            else:
+                param_condition[key] = value
+        return param_condition
+
+    def _parameterize_success_condition_value(self, value, params_map: dict[str, str]):
+        """Replace parameter values inside a single success-condition value."""
+        if isinstance(value, str):
+            new_val = value
+            for orig, param_name in params_map.items():
+                new_val = new_val.replace(orig, f"{{{{{param_name}}}}}")
+            return new_val
+        if isinstance(value, list):
+            return [self._parameterize_success_condition_value(v, params_map) for v in value]
+        if isinstance(value, dict):
+            return self._parameterize_success_condition(value, params_map)
+        return value
 
     def _save_skill(self, task: str, plan: list[dict], success_condition: dict,
                     tools_used: list[str], success: bool = True) -> Optional[str]:
@@ -508,8 +547,17 @@ class AgentCLI:
                 with open(skill_file) as fh:
                     existing = json.load(fh)
                 existing_plan = existing.get("plan", [])
-                # If existing plan has different structure, save as a variant
-                if len(existing_plan) != len(plan):
+                # Compare plan structure: same length AND same action+tool per step
+                same_structure = (
+                    len(existing_plan) == len(plan)
+                    and all(
+                        existing_plan[i].get("action") == plan[i].get("action")
+                        and existing_plan[i].get("tool") == plan[i].get("tool")
+                        for i in range(len(plan))
+                    )
+                )
+                if not same_structure:
+                    # Different plan structure — save as a variant
                     variant = len(plan)
                     skill_name = f"{skill_name}-{variant}"
                     skill_file = self.skills_dir / f"{skill_name}.json"
@@ -526,6 +574,9 @@ class AgentCLI:
         # New skill — parameterize the plan
         param_plan, params_map, task_regex = self._parameterize_plan(task, plan)
 
+        # Parameterize the success_condition too: replace concrete values with placeholders
+        param_condition = self._parameterize_success_condition(success_condition, params_map)
+
         skill_data = {
             "name": skill_name,
             "task_regex": task_regex,
@@ -534,7 +585,7 @@ class AgentCLI:
             "params_map": params_map,
             "plan": param_plan,
             "tools_used": sorted(set(tools_used)),
-            "success_condition": success_condition,
+            "success_condition": param_condition,
             "success_count": 1 if success else 0,
             "invalidated": False,
         }

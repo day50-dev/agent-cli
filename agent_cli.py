@@ -418,7 +418,7 @@ class AgentCLI:
 
         for step in plan:
             for arg in step.get("args", []):
-                if (re.search(rf'\b{re.escape(arg)}\b', task)
+                if (re.search(rf'(?:^|\s){re.escape(arg)}(?:\s|$)', task)
                         and arg not in STATIC_COMMAND_WORDS
                         and not arg.startswith("-")
                         and len(arg) > 1
@@ -454,7 +454,7 @@ class AgentCLI:
         """Build a regex that captures parameter values from future task strings.
 
         Static parts of the task are re.escape()'d; variable parts become
-        named capture groups like (?P<repo_url>https?://\S+).
+        named capture groups like (?P<repo_url>https?://\\S+).
         """
         if not params_map:
             return re.escape(task)
@@ -481,11 +481,11 @@ class AgentCLI:
                 parts.append(re.escape(task[last_end:idx]))
             # Choose capture pattern based on value type
             if re.match(r'https?://', value):
-                parts.append(f"(?P<{name}>https?://\\S+)")
+                parts.append(rf"(?P<{name}>https?://\S+)")
             elif re.match(r'^\d+\.\d+', value):
-                parts.append(f"(?P<{name}>\\d+\\.\\d+(?:\\.\\d+)*)")
+                parts.append(rf"(?P<{name}>\d+\.\d+(?:\.\d+)*)")
             else:
-                parts.append(f"(?P<{name}>\\S+)")
+                parts.append(rf"(?P<{name}>\S+)")
             last_end = idx + length
 
         # Remaining static part after last parameter

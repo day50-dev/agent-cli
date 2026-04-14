@@ -89,6 +89,18 @@ def classify_tool(name: str) -> str:
     return TOOL_TASK_CLASSIFIER.get(name, "general")
 
 
+# Command words and flags that should NOT be turned into skill parameters.
+# These are static command sub-words (like "clone" in "git clone") that are
+# part of the tool's interface, not variable inputs.
+STATIC_COMMAND_WORDS = {
+    "clone", "init", "add", "commit", "push", "pull", "fetch", "checkout",
+    "ls", "cat", "head", "tail", "man", "cp", "mv", "rm", "mkdir", "rmdir",
+    "install", "build", "test", "run", "start", "stop", "status", "log",
+    "diff", "branch", "merge", "rebase", "create", "delete", "update",
+    "list", "show", "read", "write", "generate", "new", "and", "or",
+}
+
+
 # Output markers for visual hierarchy
 MARKER_TASK   = "▸▸▸"       # task header
 MARKER_STEP   = "▹"         # sub-step / phase header
@@ -314,6 +326,8 @@ class AgentCLI:
                         "file_path": str(f),
                         "description": data.get("description", ""),
                         "task_pattern": data.get("task_pattern", ""),
+                        "task_regex": data.get("task_regex", ""),
+                        "params_map": data.get("params_map", {}),
                         "success_count": data.get("success_count", 1),
                         "tools_used": data.get("tools_used", []),
                         "invalidated": data.get("invalidated", False),
@@ -324,15 +338,30 @@ class AgentCLI:
         return skills
 
     def _find_applicable_skill(self, task: str) -> Optional[dict]:
-        task_lower = task.lower()
+        """Find a skill that matches the task using the stored task_regex pattern.
+
+        When a match is found, the extracted parameter values are stored
+        in skill["_extracted_params"] for use by apply_skill().
+        """
         for skill in self.get_available_skills():
             if skill.get("invalidated"):
                 continue
-            pattern = skill.get("task_pattern", "").lower()
-            if not pattern:
+            regex = skill.get("task_regex", "")
+            if not regex:
+                # Fallback: try legacy task_pattern substring matching
+                pattern = skill.get("task_pattern", "").lower()
+                if pattern and (pattern in task.lower() or task.lower() in pattern):
+                    return skill
                 continue
-            if pattern in task_lower or task_lower in pattern:
-                return skill
+            try:
+                match = re.search(regex, task, re.IGNORECASE)
+                if match:
+                    # Store extracted parameters for use by apply_skill
+                    skill["_extracted_params"] = match.groupdict()
+                    return skill
+            except re.error:
+                # Invalid regex in skill file — skip it
+                continue
         return None
 
     def _load_skill(self, name: str) -> dict:
@@ -354,32 +383,159 @@ class AgentCLI:
                     pass
         return {}
 
+    def _generalize_skill_name(self, plan: list[dict]) -> str:
+        """Derive a generalized skill name from the plan's primary action.
+
+        E.g. plan with action 'clone_repository' → 'clone-repository'
+        """
+        for step in plan:
+            action = step.get("action", "")
+            if action:
+                return action.replace("_", "-").lower()
+        return "generic-task"
+
+    def _infer_param_name(self, value: str) -> str:
+        """Generate a semantic parameter name based on the value type."""
+        if re.match(r'https?://', value):
+            return "repo_url"
+        if re.match(r'^\d+\.\d+', value):
+            return "version"
+        if '/' in value and not value.startswith('/') and not value.startswith('-'):
+            return "repo_path"
+        return "target"
+
+    def _parameterize_plan(self, task: str, plan: list[dict]) -> tuple[list[dict], dict[str, str], str]:
+        """Replace specific values in plan with placeholders.
+
+        Returns (param_plan, params_map, task_regex) where:
+          param_plan: plan with {{param_name}} placeholders in args
+          params_map: {original_value: param_name}
+          task_regex: regex to extract params from future task strings
+        """
+        # 1. Collect variable values from the plan that appear in the task
+        params_map = {}  # value → param_name
+        name_counts = {}  # param_name → count (for dedup)
+
+        for step in plan:
+            for arg in step.get("args", []):
+                if (arg in task
+                        and arg not in STATIC_COMMAND_WORDS
+                        and not arg.startswith("-")
+                        and len(arg) > 1
+                        and arg not in params_map):
+                    name = self._infer_param_name(arg)
+                    # Handle name collisions (e.g. multiple URLs → repo_url, repo_url_2)
+                    if name in name_counts:
+                        name_counts[name] += 1
+                        name = f"{name}_{name_counts[name]}"
+                    else:
+                        name_counts[name] = 1
+                    params_map[arg] = name
+
+        # 2. Build parameterized plan
+        param_plan = []
+        for step in plan:
+            new_step = dict(step)
+            new_args = []
+            for arg in step.get("args", []):
+                if arg in params_map:
+                    new_args.append(f"{{{{{params_map[arg]}}}}}")
+                else:
+                    new_args.append(arg)
+            new_step["args"] = new_args
+            param_plan.append(new_step)
+
+        # 3. Build task_regex from task string
+        task_regex = self._build_task_regex(task, params_map)
+
+        return param_plan, params_map, task_regex
+
+    def _build_task_regex(self, task: str, params_map: dict[str, str]) -> str:
+        """Build a regex that captures parameter values from future task strings.
+
+        Static parts of the task are re.escape()'d; variable parts become
+        named capture groups like (?P<repo_url>https?://\S+).
+        """
+        if not params_map:
+            return re.escape(task)
+
+        # Find positions of all parameter values in the task string
+        positions = []
+        for value, name in params_map.items():
+            idx = task.find(value)
+            if idx >= 0:
+                positions.append((idx, len(value), name, value))
+
+        # Sort by position (left to right)
+        positions.sort(key=lambda x: x[0])
+
+        # Build regex by alternating escaped static text with capture groups
+        parts = []
+        last_end = 0
+        for idx, length, name, value in positions:
+            # Skip overlapping positions
+            if idx < last_end:
+                continue
+            # Escape static part before this parameter
+            if idx > last_end:
+                parts.append(re.escape(task[last_end:idx]))
+            # Choose capture pattern based on value type
+            if re.match(r'https?://', value):
+                parts.append(f"(?P<{name}>https?://\\S+)")
+            else:
+                parts.append(f"(?P<{name}>\\S+)")
+            last_end = idx + length
+
+        # Remaining static part after last parameter
+        if last_end < len(task):
+            parts.append(re.escape(task[last_end:]))
+
+        return "".join(parts)
+
     def _save_skill(self, task: str, plan: list[dict], success_condition: dict,
                     tools_used: list[str], success: bool = True) -> Optional[str]:
-        """Persist the completed task as a reusable skill."""
+        """Persist the completed task as a reusable, parameterized skill."""
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate a stable skill name from the task
-        skill_slug = re.sub(r'[^a-z0-9]+', '-', task.lower().strip())[:60].strip('-')
-        skill_file = self.skills_dir / f"{skill_slug}.json"
+        # Generate a generalized skill name from the plan's action type
+        skill_name = self._generalize_skill_name(plan)
+        skill_file = self.skills_dir / f"{skill_name}.json"
 
-        # If skill already exists, bump success_count instead of overwriting
+        # If skill already exists, check plan compatibility
         existing = {}
         if skill_file.exists():
             try:
                 with open(skill_file) as fh:
                     existing = json.load(fh)
+                existing_plan = existing.get("plan", [])
+                # If existing plan has different structure, save as a variant
+                if len(existing_plan) != len(plan):
+                    variant = len(plan)
+                    skill_name = f"{skill_name}-{variant}"
+                    skill_file = self.skills_dir / f"{skill_name}.json"
+                    existing = {}
+                else:
+                    # Same structure — bump success count, keep existing parameterization
+                    existing["success_count"] = existing.get("success_count", 0) + (1 if success else 0)
+                    with open(skill_file, "w") as fh:
+                        json.dump(existing, fh, indent=2)
+                    return str(skill_file)
             except (json.JSONDecodeError, IOError):
                 pass
 
+        # New skill — parameterize the plan
+        param_plan, params_map, task_regex = self._parameterize_plan(task, plan)
+
         skill_data = {
-            "name": existing.get("name", task),
-            "task_pattern": existing.get("task_pattern", task.lower()),
-            "description": existing.get("description", f"Auto-saved from: {task}"),
-            "plan": plan,
+            "name": skill_name,
+            "task_regex": task_regex,
+            "task_pattern": task.lower(),  # legacy compat
+            "description": f"Parameterized skill: {skill_name}",
+            "params_map": params_map,
+            "plan": param_plan,
             "tools_used": sorted(set(tools_used)),
             "success_condition": success_condition,
-            "success_count": existing.get("success_count", 0) + (1 if success else 0),
+            "success_count": 1 if success else 0,
             "invalidated": False,
         }
 
@@ -429,7 +585,14 @@ class AgentCLI:
         return True
 
     def apply_skill(self, skill_meta: dict) -> bool:
-        """Execute a saved skill's plan. Returns True if all steps succeeded."""
+        """Execute a saved skill's plan with parameter substitution.
+
+        Extracts parameter values from the current task (stored in
+        skill_meta["_extracted_params"] by _find_applicable_skill), substitutes
+        them into the parameterized plan, then executes.
+
+        Returns True if all steps succeeded.
+        """
         # Load full skill data from file
         full = self._load_skill(skill_meta["name"])
         if not full:
@@ -441,13 +604,40 @@ class AgentCLI:
             print(f"{MARKER_INFO} skill has no saved plan")
             return False
 
+        # Get extracted parameters (set by _find_applicable_skill)
+        extracted_params = skill_meta.get("_extracted_params", {})
+
+        # Resolve parameter placeholders in plan args
+        resolved_plan = []
+        for step in plan:
+            resolved_step = dict(step)
+            resolved_args = []
+            for arg in step.get("args", []):
+                resolved_arg = arg
+                for param_name, param_value in extracted_params.items():
+                    resolved_arg = resolved_arg.replace(f"{{{{{param_name}}}}}", param_value)
+                resolved_args.append(resolved_arg)
+            resolved_step["args"] = resolved_args
+            resolved_plan.append(resolved_step)
+
+        # Check for unresolved parameters
+        unresolved = []
+        for step in resolved_plan:
+            for arg in step.get("args", []):
+                unresolved.extend(re.findall(r'\{\{(\w+)\}\}', arg))
+        if unresolved:
+            print(f"{MARKER_FAIL} unresolved parameters: {', '.join(set(unresolved))}")
+            return False
+
         print(f"{MARKER_OK} executing skill: {full.get('name', skill_meta['name'])}")
-        print(f"{MARKER_INFO} pattern: {full.get('task_pattern', '')}")
+        if extracted_params:
+            param_str = ", ".join(f"{k}={v}" for k, v in extracted_params.items())
+            print(f"{MARKER_INFO} params: {param_str}")
         if full.get("tools_used"):
             print(f"{MARKER_INFO} tools: {', '.join(full['tools_used'])}")
 
         # Validate each step
-        for i, step in enumerate(plan):
+        for i, step in enumerate(resolved_plan):
             tool = step.get("tool")
             if tool and tool not in self.all_tool_names():
                 if self.discover_tool(tool):
@@ -459,7 +649,7 @@ class AgentCLI:
                     return False
 
         # Execute
-        for i, step in enumerate(plan):
+        for i, step in enumerate(resolved_plan):
             print(f"\n{MARKER_STEP} skill step {i + 1}: {step['action']}")
             tool = step.get("tool")
             args = step.get("args", [])

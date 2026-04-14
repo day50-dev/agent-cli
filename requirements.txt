@@ -1,0 +1,3 @@
+# agent-cli dependencies
+# Core dependencies (using only standard library for now)
+# Future: Add LLM provider SDKs here

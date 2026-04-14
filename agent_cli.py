@@ -802,6 +802,47 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # LLM inference
     # ------------------------------------------------------------------
+    def list_models(self):
+        """Query the /models endpoint and display available models."""
+        if not self.model_config.get("key"):
+            print(f"{MARKER_FAIL} no API key configured — run: agent-cli --set key <your-key>")
+            return
+
+        base_url = self.model_config.get("base_url") or "https://api.openai.com/v1"
+        url = f"{base_url.rstrip('/')}/models"
+
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.model_config['key']}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            print(f"{MARKER_FAIL} HTTP {e.code}: {e.reason}  ({url})")
+            return
+        except Exception as e:
+            print(f"{MARKER_FAIL} request failed: {e}")
+            return
+
+        models = result.get("data", [])
+        if not models:
+            print(f"{MARKER_INFO} no models returned from {url}")
+            return
+
+        print(f"{MARKER_OK} models available at {base_url.rstrip('/')}:")
+        for m in sorted(models, key=lambda x: x.get("id", "")):
+            mid = m.get("id", "?")
+            owner = m.get("owned_by", "")
+            line = f"  {MARKER_INFO} {mid}"
+            if owner:
+                line += f"  ({owner})"
+            print(line)
+
     def _call_model(self, messages: list[dict]) -> Optional[str]:
         """Call the configured model via OpenAI-compatible API. Returns response text or None."""
         if not self.model_config.get("model") or not self.model_config.get("key"):
@@ -1157,7 +1198,7 @@ def main():
         "--set", nargs=2, metavar=("KEY", "VALUE"),
         help="Set a model config value (model, base_url, key)",
     )
-    parser.add_argument("--model", help="Override model for this run")
+    parser.add_argument("--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
     parser.add_argument("--base-url", help="Override base_url for this run")
     parser.add_argument("--key", help="Override API key for this run")
     parser.add_argument(
@@ -1192,6 +1233,9 @@ def main():
 
     # one-shot overrides
     if args.model:
+        if args.model == "__list__":
+            agent.list_models()
+            return
         agent.model_config["model"] = args.model
     if args.base_url:
         agent.model_config["base_url"] = args.base_url

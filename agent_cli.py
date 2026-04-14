@@ -20,14 +20,17 @@ import json
 import os
 import re
 import shutil
+import site
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
 
-# Default configuration
-DEFAULT_CONFIG_DIR = Path(".config/agent-cli")
+# Default configuration — lives under site.USER_BASE (~/.local on Linux,
+# ~/Library/Python/<ver> on macOS) so it's always in a stable user location,
+# not relative to the current working directory.
+DEFAULT_CONFIG_DIR = Path(site.USER_BASE) / "agent-cli"
 DEFAULT_TOOLS_DIR = DEFAULT_CONFIG_DIR / "tools"
 DEFAULT_SKILLS_DIR = DEFAULT_CONFIG_DIR / "skills"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"

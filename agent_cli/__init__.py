@@ -1630,7 +1630,7 @@ if __name__ == "__main__":
         md += "\n"
         md += self._skills_markdown()
         md += "\n---\n\n"
-        md += "`ac '<task>'`  *  `ac --skills [name]`  *  `ac -d <skill>`  *  `ac -s model 'model-name'`\n"
+        md += "* `ac '<task>'`\n* `ac --skills [name]`\n* `ac -d <skill>`\n* `ac -s model 'model-name'`\n"
         self.out.markdown(md)
 
     def _skills_markdown(self) -> str:

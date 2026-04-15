@@ -23,6 +23,8 @@ import shutil
 import site
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 import yaml
@@ -196,6 +198,76 @@ class Output:
         label = self._c(self._DIM, f"{key}:")
         print(f"  · {label:14s} {value}")
 
+    # ---- spinner ----
+
+    def spinner(self, label: str = "Thinking"):
+        """Return a Spinner context manager animating while waiting."""
+        return Spinner(label, no_color=self._no_color)
+
+
+class Spinner:
+    """Context-manager spinner that animates on the terminal while waiting.
+
+    Usage::
+
+        with spinner("Thinking"):
+            result = slow_operation()
+
+    The spinner clears itself on exit and restores the cursor.
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _INTERVAL = 0.08  # seconds per frame
+
+    def __init__(self, label: str = "Thinking", no_color: bool = False):
+        self._label = label
+        self._no_color = no_color or not sys.stdout.isatty()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    # ---- colour helpers (mirrors Output) ----
+
+    def _c(self, code: str, text: str) -> str:
+        if self._no_color:
+            return text
+        return f"{code}{text}{Output._RESET}"
+
+    def _spin(self):
+        idx = 0
+        while not self._stop.is_set():
+            frame = self._FRAMES[idx % len(self._FRAMES)]
+            dim_label = self._c(Output._DIM, self._label)
+            colored_frame = self._c(Output._CYAN, frame)
+            # \r returns to column 0; \033[?25l hides cursor
+            sys.stdout.write(f"\r  {colored_frame} {dim_label}…\033[?25l")
+            sys.stdout.flush()
+            self._stop.wait(self._INTERVAL)
+            idx += 1
+
+    # ---- context-manager protocol ----
+
+    def __enter__(self):
+        if self._no_color:
+            # Still show a static label so the user knows something is happening
+            sys.stdout.write(f"  · {self._label}…")
+            sys.stdout.flush()
+            return self
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        if not self._no_color:
+            # Clear the spinner line and restore cursor
+            sys.stdout.write("\r" + " " * (len(self._label) + 10) + "\r\033[?25h")
+            sys.stdout.flush()
+        else:
+            # Clear the static label
+            sys.stdout.write("\r" + " " * (len(self._label) + 6) + "\r")
+            sys.stdout.flush()
 
 
 class AgentCLI:
@@ -1094,8 +1166,9 @@ class AgentCLI:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read())
+            with self.out.spinner("Fetching models"):
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             self.out.fatal(f"HTTP {e.code}: {e.reason}  ({url})")
             return
@@ -1141,9 +1214,10 @@ class AgentCLI:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                result = json.loads(resp.read())
-                return result["choices"][0]["message"]["content"]
+            with self.out.spinner("Thinking"):
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result = json.loads(resp.read())
+                    return result["choices"][0]["message"]["content"]
         except Exception as e:
             self.out.fatal(f"model call failed: {e}")
             return None

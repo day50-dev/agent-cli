@@ -1,6 +1,6 @@
 # agent-cli
 
-**agent-cli** is a one-shot command-line helper that automates scoped execution tasks. It runs in the foreground, provides clear visual feedback of its progress, uses isolation via symlinked tools, and learns new capabilities ("skills") through successful task execution.
+**agent-cli** (alias: **ac**) is a one-shot command-line helper that automates scoped execution tasks. It runs in the foreground, provides clear visual feedback of its progress, uses isolation via symlinked tools, and learns new capabilities ("skills") through successful task execution.
 
 ## Core Concepts
 
@@ -84,17 +84,18 @@ $ agent-cli --model "claude-3" "clone this repo: https://github.com/user/repo"
 ## Usage
 
 ### Examples
-- `agent-cli "clone github.com/akash-network/node as akash-node"`
-- `agent-cli "list all files in the current directory"`
-- `agent-cli "read the content of README.md"`
+- `ac "clone github.com/akash-network/node as akash-node"`
+- `ac "list all files in the current directory"`
+- `ac "read the content of README.md"`
+- `agent-cli` and `ac` are interchangeable — `ac` is the short alias.
 
 ### Management Commands
-- **List Skills:** `agent-cli --skills`
-- **Skill Detail:** `agent-cli --skills <skill-name>` — shows SKILL.md instructions, parameters, plan, and matching regex
-- **Invalidate a Skill:** `agent-cli --invalidate <skill-name>` (prevents the agent from using it)
-- **Delete a Skill:** `agent-cli --delete <skill-name>`
+- **List Skills:** `ac --skills`
+- **Skill Detail:** `ac --skills <skill-name>` — shows SKILL.md instructions, parameters, plan, and matching regex
+- **Invalidate a Skill:** `ac --invalidate <skill-name>` (prevents the agent from using it)
+- **Delete a Skill:** `ac --delete <skill-name>`
 - **Auto-approve:** Use `-y` or `--yes` to skip confirmation prompts for symlinking tools.
-- **Status:** Running `agent-cli` without arguments shows the current tool and skill status.
+- **Status:** Running `ac` without arguments shows the current tool and skill status.
 
 ### Config Location
 The config directory defaults to `site.USER_BASE/agent-cli`:

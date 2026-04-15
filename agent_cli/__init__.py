@@ -558,7 +558,7 @@ class AgentCLI:
             body = (
                 f"# {skill_name}\n\n"
                 f"{desc}\n\n"
-                f"### Parameters\n\n"
+                f"### Parameters\n"
                 "This skill is parameterized.  Values are extracted from the\n"
                 "user's task string via `task_regex` and substituted into the\n"
                 "plan before execution.\n"
@@ -963,7 +963,7 @@ class AgentCLI:
         params_section = ""
         if param_lines:
             params_section = (
-                "\n### Parameters\n\n"
+                "\n### Parameters\n"
                 "Values are extracted from the task string via `task_regex` "
                 "and substituted into the plan before execution.\n\n"
                 + "\n".join(param_lines) + "\n"
@@ -1624,7 +1624,7 @@ if __name__ == "__main__":
     def show_status(self):
         tools = self.get_all_symlinked_tools()
         md = "# agent-cli\n\n"
-        md += "### tools\n\n"
+        md += "### Tools\n"
         for task, names in sorted(tools.items()):
             md += f"- **{task}/bin/** {'  '.join(names)}\n"
         md += "\n"
@@ -1687,7 +1687,7 @@ if __name__ == "__main__":
         # Pattern / regex
         regex = data.get("task_regex", "")
         pattern = data.get("task_pattern", "")
-        md += "### matching\n\n"
+        md += "### Matching\n"
         if regex:
             md += f"**task_regex:** `{_md_escape(regex)}`\n\n"
         if pattern:
@@ -1696,7 +1696,7 @@ if __name__ == "__main__":
         # Parameters
         params = data.get("params_map", {})
         if params:
-            md += "### parameters\n\n"
+            md += "### Parameters\n"
             for orig, pname in params.items():
                 md += f"- **{pname}:** `{_md_escape(orig)}`\n"
             md += "\n"
@@ -1704,7 +1704,7 @@ if __name__ == "__main__":
         # Plan
         plan = data.get("plan", [])
         if plan:
-            md += "### plan\n\n"
+            md += "### Plan\n"
             for i, step in enumerate(plan):
                 tool = step.get("tool", "custom")
                 args = step.get("args", [])
@@ -1715,7 +1715,7 @@ if __name__ == "__main__":
         # Success condition
         condition = data.get("success_condition", {})
         if condition:
-            md += "### success condition\n\n"
+            md += "### Success Condition\n"
             cond_desc = condition.get("description", "")
             if cond_desc:
                 md += f"> {cond_desc}\n"

@@ -1112,8 +1112,8 @@ class AgentCLI:
         ])
 
         if result is None:
-            self.out.warning("verification call failed — assuming success")
-            return True
+            self.out.warning("verification call failed — cannot confirm success")
+            return False
 
         result = result.strip()
         if result.startswith("```"):
@@ -1132,8 +1132,8 @@ class AgentCLI:
                 self.out.fatal(f"verification failed: {reason}")
                 return False
         except (json.JSONDecodeError, ValueError):
-            self.out.warning("verification response unparseable — assuming success")
-            return True
+            self.out.warning("verification response unparseable — cannot confirm success")
+            return False
 
     # ------------------------------------------------------------------
     # LLM inference
@@ -1345,11 +1345,8 @@ class AgentCLI:
             result = result.strip()
         try:
             parsed = json.loads(result)
-            # Accept either the new object format or legacy array format
-            if isinstance(parsed, list):
-                plan = parsed
-                success_condition = f"Task '{task}' completed successfully"
-            elif isinstance(parsed, dict):
+            # Must be the new object format with plan + success_condition
+            if isinstance(parsed, dict):
                 plan = parsed.get("plan", [])
                 success_condition = parsed.get("success_condition", f"Task '{task}' completed successfully")
             else:

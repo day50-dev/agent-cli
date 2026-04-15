@@ -51,23 +51,25 @@ If a task cannot be achieved with existing system tools, the agent can write a c
 **agent-cli** is model and provider agnostic. It supports any OpenAI-compatible API. Configuration is stored at `~/.local/agent-cli/config.json`.
 
 ### Model Setup
-Set your API configuration using the `--set` command:
+Set your API configuration using the `-s` / `--set` command:
 ```bash
-$ agent-cli --set model "gpt-4o"
-$ agent-cli --set base_url "https://api.openai.com/v1"
-$ agent-cli --set key "your-api-key"
+$ ac -s model "gpt-4o"
+$ ac -s base_url "https://api.openai.com/v1"
+$ ac -s key "your-api-key"
 ```
+
+Run `ac -s` with no arguments to show current values (API key is masked).
 
 The `base_url` is auto-corrected: if it doesn't already end with a versioned path like `/v1` or `/v1beta`, `/v1` is appended automatically. So you can set just the domain:
 ```bash
-$ agent-cli --set base_url "https://integrate.api.nvidia.com"
+$ ac -s base_url "https://integrate.api.nvidia.com"
 # → resolves to https://integrate.api.nvidia.com/v1
 ```
 
 ### List Available Models
-Run `--model` with no value to query the `/models` endpoint and see what's available — useful for verifying your `base_url` and key are correct:
+Run `-m` / `--model` with no value to query the `/models` endpoint and see what's available — useful for verifying your `base_url` and key are correct:
 ```bash
-$ agent-cli --model
+$ ac -m
   ✓ models available at https://api.openai.com/v1:
   · gpt-4o  (openai)
   · gpt-4o-mini  (openai)
@@ -76,7 +78,7 @@ $ agent-cli --model
 ### One-shot Overrides
 You can override configuration for a single run:
 ```bash
-$ agent-cli --model "claude-3" "clone this repo: https://github.com/user/repo"
+$ ac -m "claude-3" "clone this repo: https://github.com/user/repo"
 ```
 
 ---
@@ -92,9 +94,8 @@ $ agent-cli --model "claude-3" "clone this repo: https://github.com/user/repo"
 ### Management Commands
 - **List Skills:** `ac --skills`
 - **Skill Detail:** `ac --skills <skill-name>` — shows SKILL.md instructions, parameters, plan, and matching regex
-- **Invalidate a Skill:** `ac --invalidate <skill-name>` (prevents the agent from using it)
-- **Delete a Skill:** `ac --delete <skill-name>`
-- **Auto-approve:** Use `-y` or `--yes` to skip confirmation prompts for symlinking tools.
+- **Delete a Skill:** `ac -d <skill-name>` — removes a bad skill so it must be re-learned from scratch
+- **Auto-approve:** Use `-y` / `--yes` to skip confirmation prompts for symlinking tools.
 - **Status:** Running `ac` without arguments shows the current tool and skill status.
 
 ### Config Location
@@ -105,4 +106,4 @@ The config directory defaults to `site.USER_BASE/agent-cli`:
 | Linux | `~/.local/agent-cli/` |
 | macOS (framework build) | `~/Library/Python/3.x/agent-cli/` |
 | macOS (non-framework) | `~/.local/agent-cli/` |
-| Override | `--config-dir <path>` or `PYTHONUSERBASE=<dir>` |
+| Override | `-c <path>` / `--config-dir <path>` or `PYTHONUSERBASE=<dir>` |

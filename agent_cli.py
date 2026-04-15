@@ -95,6 +95,16 @@ def classify_tool(name: str) -> str:
     return TOOL_TASK_CLASSIFIER.get(name, "general")
 
 
+# ANSI escape codes — module-level so Output and Spinner share them.
+_ANSI_BOLD   = "\033[1m"
+_ANSI_DIM    = "\033[2m"
+_ANSI_RESET  = "\033[0m"
+_ANSI_GREEN  = "\033[32m"
+_ANSI_RED    = "\033[31m"
+_ANSI_YELLOW = "\033[33m"
+_ANSI_CYAN   = "\033[36m"
+_ANSI_BLUE   = "\033[34m"
+
 # Command words and flags that should NOT be turned into skill parameters.
 # These are static command sub-words (like "clone" in "git clone") that are
 # part of the tool's interface, not variable inputs.
@@ -121,16 +131,6 @@ class Output:
     (e.g. JSON, logfmt, no-color mode) later.
     """
 
-    # ANSI escape codes
-    _BOLD   = "\033[1m"
-    _DIM    = "\033[2m"
-    _RESET  = "\033[0m"
-    _GREEN  = "\033[32m"
-    _RED    = "\033[31m"
-    _YELLOW = "\033[33m"
-    _CYAN   = "\033[36m"
-    _BLUE   = "\033[34m"
-
     def __init__(self, no_color: bool = False):
         self._no_color = no_color or not sys.stdout.isatty()
 
@@ -138,64 +138,64 @@ class Output:
         """Wrap *text* in ANSI *code* unless colour is disabled."""
         if self._no_color:
             return text
-        return f"{code}{text}{self._RESET}"
+        return f"{code}{text}{_ANSI_RESET}"
 
     # ---- semantic primitives ----
 
     def headline(self, text: str) -> None:
         """Top-level task title — the main thing happening."""
-        marker = self._c(self._BOLD, "▸▸▸")
-        print(f"{marker} {self._c(self._BOLD, text)}")
+        marker = self._c(_ANSI_BOLD, "▸▸▸")
+        print(f"{marker} {self._c(_ANSI_BOLD, text)}")
 
     def section(self, text: str) -> None:
         """Sub-step / phase header — groups related output."""
-        marker = self._c(self._CYAN, "▹")
-        print(f"\n{marker} {self._c(self._BOLD, text)}")
+        marker = self._c(_ANSI_CYAN, "▹")
+        print(f"\n{marker} {self._c(_ANSI_BOLD, text)}")
 
     def success(self, text: str) -> None:
         """Positive outcome: approved, completed, confirmed."""
-        marker = self._c(self._GREEN, "✓")
+        marker = self._c(_ANSI_GREEN, "✓")
         print(f"  {marker} {text}")
 
     def warning(self, text: str) -> None:
         """Non-critical issue: degraded path, fallback, something to note."""
-        marker = self._c(self._YELLOW, "⚠")
-        print(f"  {marker} {self._c(self._YELLOW, text)}")
+        marker = self._c(_ANSI_YELLOW, "⚠")
+        print(f"  {marker} {self._c(_ANSI_YELLOW, text)}")
 
     def fatal(self, text: str) -> None:
         """Critical failure: cannot proceed."""
-        marker = self._c(self._RED, "✗")
-        print(f"\n  {marker} {self._c(self._RED, text)}")
+        marker = self._c(_ANSI_RED, "✗")
+        print(f"\n  {marker} {self._c(_ANSI_RED, text)}")
 
     def info(self, text: str) -> None:
         """Neutral informational note."""
-        marker = self._c(self._DIM, "·")
-        print(f"  {marker} {self._c(self._DIM, text)}")
+        marker = self._c(_ANSI_DIM, "·")
+        print(f"  {marker} {self._c(_ANSI_DIM, text)}")
 
     def command(self, text: str) -> None:
         """A command about to be executed."""
-        marker = self._c(self._BLUE, "➜")
-        print(f"\n  {marker} {self._c(self._BOLD, text)}")
+        marker = self._c(_ANSI_BLUE, "➜")
+        print(f"\n  {marker} {self._c(_ANSI_BOLD, text)}")
 
     def output(self, text: str) -> None:
         """Captured output line from a tool."""
-        print(f"  │ {self._c(self._DIM, text)}")
+        print(f"  │ {self._c(_ANSI_DIM, text)}")
 
     def prompt(self, text: str, end: str = "\n") -> None:
         """User interaction prompt."""
-        marker = self._c(self._YELLOW, "?")
+        marker = self._c(_ANSI_YELLOW, "?")
         print(f"\n  {marker} {text}", end=end)
 
     def separator(self) -> None:
         """Horizontal rule separating major sections."""
         line = "─" * 60
-        print(self._c(self._DIM, line))
+        print(self._c(_ANSI_DIM, line))
 
     # ---- compound helpers ----
 
     def kv(self, key: str, value: str) -> None:
         """Key-value pair in a detail view (left-aligned label + value)."""
-        label = self._c(self._DIM, f"{key}:")
+        label = self._c(_ANSI_DIM, f"{key}:")
         print(f"  · {label:14s} {value}")
 
     # ---- spinner ----
@@ -221,23 +221,23 @@ class Spinner:
 
     def __init__(self, label: str = "Thinking", no_color: bool = False):
         self._label = label
-        self._no_color = no_color or not sys.stdout.isatty()
+        self._no_tty = no_color or not sys.stdout.isatty()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
-    # ---- colour helpers (mirrors Output) ----
+    # ---- colour helpers (uses module-level ANSI codes) ----
 
     def _c(self, code: str, text: str) -> str:
-        if self._no_color:
+        if self._no_tty:
             return text
-        return f"{code}{text}{Output._RESET}"
+        return f"{code}{text}{_ANSI_RESET}"
 
     def _spin(self):
         idx = 0
         while not self._stop.is_set():
             frame = self._FRAMES[idx % len(self._FRAMES)]
-            dim_label = self._c(Output._DIM, self._label)
-            colored_frame = self._c(Output._CYAN, frame)
+            dim_label = self._c(_ANSI_DIM, self._label)
+            colored_frame = self._c(_ANSI_CYAN, frame)
             # \r returns to column 0; \033[?25l hides cursor
             sys.stdout.write(f"\r  {colored_frame} {dim_label}…\033[?25l")
             sys.stdout.flush()
@@ -247,10 +247,8 @@ class Spinner:
     # ---- context-manager protocol ----
 
     def __enter__(self):
-        if self._no_color:
-            # Still show a static label so the user knows something is happening
-            sys.stdout.write(f"  · {self._label}…")
-            sys.stdout.flush()
+        if self._no_tty:
+            # Complete no-op when stdout is not a TTY — avoids garbled piped output
             return self
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
@@ -260,13 +258,9 @@ class Spinner:
         self._stop.set()
         if self._thread:
             self._thread.join()
-        if not self._no_color:
+        if not self._no_tty:
             # Clear the spinner line and restore cursor
             sys.stdout.write("\r" + " " * (len(self._label) + 10) + "\r\033[?25h")
-            sys.stdout.flush()
-        else:
-            # Clear the static label
-            sys.stdout.write("\r" + " " * (len(self._label) + 6) + "\r")
             sys.stdout.flush()
 
 
@@ -288,6 +282,7 @@ class AgentCLI:
         }
 
         self.out = Output()
+        self._skills_migrated = False
 
         self._load_config()
         self._setup_directories()
@@ -320,6 +315,17 @@ class AgentCLI:
                 f"Valid keys: {', '.join(self.model_config.keys())}"
             )
             sys.exit(1)
+
+    def show_model_config(self):
+        """Display current model configuration values."""
+        self.out.section("model config")
+        for key, value in self.model_config.items():
+            if key == "key" and value:
+                # Mask the API key for security
+                masked = value[:4] + "****" + value[-4:] if len(value) > 8 else "****"
+                self.out.kv(key, masked)
+            else:
+                self.out.kv(key, value or "(not set)")
 
     # ------------------------------------------------------------------
     # Directory & symlink setup
@@ -471,13 +477,17 @@ class AgentCLI:
     #                   body with instructions / context for LLM use
     #     plan.json  — machine-readable execution data:
     #                   plan, params_map, task_regex, success_condition,
-    #                   success_count, invalidated, tools_used
+    #                   success_count, tools_used
     #
     # This follows the Agent Skills standard (agentskills.io) and is
     # compatible with Anthropic's Claude skill ecosystem.
 
     def _migrate_legacy_skills(self):
-        """One-time migration: convert flat .json skill files to SKILL.md directories."""
+        """One-time migration: convert flat .json skill files to SKILL.md directories,
+        and clean up any skills previously marked as 'invalidated' (now deleted)."""
+        if self._skills_migrated:
+            return
+        self._skills_migrated = True
         if not self.skills_dir.exists():
             return
         for f in list(self.skills_dir.iterdir()):
@@ -530,6 +540,20 @@ class AgentCLI:
             # Remove the old JSON file
             f.unlink()
 
+        # Also clean up skills that were previously 'invalidated' —
+        # invalidate is now delete, so legacy invalidated dirs are stale.
+        for d in list(self.skills_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            plan_file = d / "plan.json"
+            if plan_file.exists():
+                try:
+                    with open(plan_file) as fh:
+                        if json.load(fh).get("invalidated"):
+                            shutil.rmtree(d, ignore_errors=True)
+                except (json.JSONDecodeError, IOError):
+                    pass
+
     def _parse_skill_md(self, skill_dir: Path) -> Optional[dict]:
         """Read SKILL.md frontmatter and return the YAML metadata dict."""
         skill_md = skill_dir / "SKILL.md"
@@ -574,7 +598,6 @@ class AgentCLI:
                 "params_map": plan_data.get("params_map", {}),
                 "success_count": plan_data.get("success_count", 1),
                 "tools_used": plan_data.get("tools_used", []),
-                "invalidated": plan_data.get("invalidated", False),
             })
         return skills
 
@@ -585,8 +608,6 @@ class AgentCLI:
         in skill["_extracted_params"] for use by apply_skill().
         """
         for skill in self.get_available_skills():
-            if skill.get("invalidated"):
-                continue
             regex = skill.get("task_regex", "")
             if not regex:
                 # Fallback: try legacy task_pattern substring matching
@@ -914,7 +935,6 @@ class AgentCLI:
             "tools_used": sorted(set(tools_used)),
             "success_condition": param_condition,
             "success_count": 1 if success else 0,
-            "invalidated": False,
         }
         with open(plan_file, "w") as fh:
             json.dump(plan_data, fh, indent=2)
@@ -934,30 +954,6 @@ class AgentCLI:
             if meta and meta.get("name") == skill_name:
                 return d
         return None
-
-    def invalidate_skill(self, skill_name: str) -> bool:
-        """Mark a skill as invalidated so it won't be used."""
-        skill_dir = self._find_skill_dir(skill_name)
-        if not skill_dir:
-            self.out.fatal(f"skill '{skill_name}' not found")
-            return False
-
-        plan_file = skill_dir / "plan.json"
-        if not plan_file.exists():
-            self.out.fatal(f"skill '{skill_name}' has no plan.json")
-            return False
-
-        try:
-            with open(plan_file) as fh:
-                data = json.load(fh)
-            data["invalidated"] = True
-            with open(plan_file, "w") as fh:
-                json.dump(data, fh, indent=2)
-            self.out.success(f"skill '{skill_name}' invalidated")
-            return True
-        except (json.JSONDecodeError, IOError) as e:
-            self.out.fatal(f"error invalidating skill: {e}")
-            return False
 
     def delete_skill(self, skill_name: str) -> bool:
         """Permanently remove a skill directory."""
@@ -1151,7 +1147,7 @@ class AgentCLI:
     def list_models(self):
         """Query the /models endpoint and display available models."""
         if not self.model_config.get("key"):
-            self.out.fatal("no API key configured — run: agent-cli --set key <your-key>")
+            self.out.fatal("no API key configured — run: ac -s key <your-key>")
             return
 
         base_url = self._resolve_base_url()
@@ -1514,10 +1510,10 @@ if __name__ == "__main__":
         self._print_skills()
 
         self.out.separator()
-        self.out.info("agent-cli '<task>'")
-        self.out.info("agent-cli --skills [name]")
-        self.out.info("agent-cli --invalidate <skill>")
-        self.out.info("agent-cli --set model 'model-name'")
+        self.out.info("ac '<task>'")
+        self.out.info("ac --skills [name]")
+        self.out.info("ac -d <skill>  (delete)")
+        self.out.info("ac -s model 'model-name'")
 
     def _print_skills(self):
         """Print a formatted list of skills."""
@@ -1527,7 +1523,7 @@ if __name__ == "__main__":
             self.out.info("none yet — they are saved automatically on success")
             return
         for s in skills:
-            status = "invalidated" if s.get("invalidated") else f"{s['success_count']}×"
+            status = f"{s['success_count']}×"
             tools_str = f" [{', '.join(s['tools_used'])}]" if s.get("tools_used") else ""
             self.out.info(f"{s['name']:30s}  {status:12s}{tools_str}")
             if s.get("description"):
@@ -1566,8 +1562,6 @@ if __name__ == "__main__":
         desc = data.get("description", "")
         if desc:
             self.out.kv("description", desc)
-        status = "invalidated" if data.get("invalidated") else "active"
-        self.out.kv("status", status)
         self.out.kv("success_count", f"{data.get('success_count', 0)}×")
         tools = data.get("tools_used", [])
         if tools:
@@ -1621,15 +1615,15 @@ def main():
     )
     parser.add_argument("task", nargs="?", help="Task description to execute")
     parser.add_argument(
-        "--set", nargs=2, metavar=("KEY", "VALUE"),
-        help="Set a model config value (model, base_url, key)",
+        "-s", "--set", nargs="*", metavar=("KEY", "VALUE"),
+        help="Set a model config value (model, base_url, key), or show current values with no args",
     )
-    parser.add_argument("--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
+    parser.add_argument("-m", "--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
     parser.add_argument("--base-url", help="Override base_url for this run")
     parser.add_argument("--key", help="Override API key for this run")
     parser.add_argument(
-        "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
-        help="Config directory (default: .config/agent-cli)",
+        "-c", "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
+        help="Config directory (default: .local/agent-cli)",
     )
     parser.add_argument(
         "-y", "--yes", action="store_true",
@@ -1640,21 +1634,25 @@ def main():
         help="List skills, or show detail for a specific skill",
     )
     parser.add_argument(
-        "--invalidate", metavar="SKILL",
-        help="Invalidate a skill so it won't be used",
-    )
-    parser.add_argument(
-        "--delete", metavar="SKILL",
-        help="Permanently delete a skill",
+        "-d", "--delete", metavar="SKILL",
+        help="Delete a skill so it won't be used and must be re-learned",
     )
 
     args = parser.parse_args()
     agent = AgentCLI(config_dir=args.config_dir, auto_yes=args.yes)
 
     # --set
-    if args.set:
-        agent.set_model_config(args.set[0], args.set[1])
-        print(f"Set {args.set[0]} = {args.set[1]}")
+    if args.set is not None:
+        if len(args.set) == 0:
+            # Show current config values
+            agent.show_model_config()
+        elif len(args.set) == 2:
+            agent.set_model_config(args.set[0], args.set[1])
+            print(f"Set {args.set[0]} = {args.set[1]}")
+        else:
+            print("Usage: ac -s [KEY VALUE]")
+            print("  (no args)  show current values")
+            print("  KEY VALUE  set a value (model, base_url, key)")
         return
 
     # one-shot overrides
@@ -1675,8 +1673,6 @@ def main():
             agent._print_skills()
         else:
             agent._print_skill_detail(args.skills)
-    elif args.invalidate:
-        agent.invalidate_skill(args.invalidate)
     elif args.delete:
         agent.delete_skill(args.delete)
     else:

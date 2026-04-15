@@ -283,6 +283,7 @@ class AgentCLI:
 
         self.out = Output()
         self._skills_migrated = False
+        self._curlify_mode = False
 
         self._load_config()
         self._setup_directories()
@@ -1162,7 +1163,7 @@ class AgentCLI:
             },
         )
         try:
-            with self.out.spinner("Fetching models"):
+            with self.out.spinner(f"Fetching models from {base_url}"):
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
@@ -1186,14 +1187,46 @@ class AgentCLI:
                 line += f"  ({owner})"
             self.out.info(line)
 
+    def _print_api_diagnostics(self, url: str):
+        """Print url, model, and masked key after an API failure."""
+        key_masked = self.model_config["key"][:4] + "****" if self.model_config.get("key") else "(none)"
+        self.out.kv("url", url)
+        self.out.kv("model", self.model_config.get("model", "(none)"))
+        self.out.kv("key", key_masked)
+        self.out.info(f"debug with: ac --curlify -m {self.model_config.get('model', '')} '<task>'")
+
+    @staticmethod
+    def _curlify(url: str, headers: dict, data: bytes) -> str:
+        """Build a curl(1) command equivalent to the given HTTP request.
+
+        Useful for debugging — paste the output into a terminal to
+        reproduce the exact request.
+        """
+        parts = ["curl", url]
+        for k, v in headers.items():
+            # Mask the Authorization header
+            if k.lower() == "authorization" and v.startswith("Bearer "):
+                token = v[7:]
+                masked = token[:4] + "****" + token[-4:] if len(token) > 8 else "****"
+                parts.append(f"-H '{k}: Bearer {masked}'")
+            else:
+                parts.append(f"-H '{k}: {v}'")
+        if data:
+            # Escape single quotes for shell safety
+            escaped = data.decode().replace("'", "'\\''")
+            parts.append(f"-d '{escaped}'")
+        return " \\\n  ".join(parts)
+
     def _call_model(self, messages: list[dict]) -> Optional[str]:
         """Call the configured model via OpenAI-compatible API. Returns response text or None."""
         if not self.model_config.get("model") or not self.model_config.get("key"):
             return None
 
+        import urllib.error
+        import urllib.request
+
         base_url = self._resolve_base_url()
         url = f"{base_url}/chat/completions"
-        import urllib.request
 
         payload = {
             "model": self.model_config["model"],
@@ -1201,21 +1234,37 @@ class AgentCLI:
             "temperature": 0.1,
         }
         data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.model_config['key']}",
-            },
-        )
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.model_config['key']}",
+        }
+        req = urllib.request.Request(url, data=data, headers=headers)
+
+        # If --curlify was requested, print the curl equivalent and exit cleanly
+        if self._curlify_mode:
+            self.out.section("curl equivalent")
+            print(self._curlify(url, headers, data))
+            sys.exit(0)
+
         try:
             with self.out.spinner("Thinking"):
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     result = json.loads(resp.read())
                     return result["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()[:500]
+            except Exception:
+                pass
+            self.out.fatal(f"model call failed: HTTP {e.code} {e.reason}")
+            self._print_api_diagnostics(url)
+            if body:
+                self.out.kv("response", body)
+            return None
         except Exception as e:
             self.out.fatal(f"model call failed: {e}")
+            self._print_api_diagnostics(url)
             return None
 
     # ------------------------------------------------------------------
@@ -1253,33 +1302,44 @@ class AgentCLI:
             f"Dirs: {', '.join(d.name for d in cwd.iterdir() if d.is_dir())[:200]}"
         )
 
+        has_model = bool(self.model_config.get("model") and self.model_config.get("key"))
+
+        if not has_model:
+            # No model configured — fall straight to heuristics
+            self.out.warning("using heuristic plan (no model configured)")
+            return self._heuristic_plan(task)
+
         result = self._call_model([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
 
-        if result:
-            # Try to extract JSON from the response
-            result = result.strip()
-            # Strip markdown code fences if present
-            if result.startswith("```"):
-                result = re.sub(r'^```(?:json)?\n?', '', result)
-                result = re.sub(r'\n?```$', '', result)
-                result = result.strip()
-            try:
-                plan = json.loads(result)
-                if isinstance(plan, list):
-                    # Validate structure
-                    for step in plan:
-                        if not isinstance(step, dict) or "action" not in step:
-                            raise ValueError("bad step")
-                    self.out.success("plan generated by model")
-                    return plan
-            except (json.JSONDecodeError, ValueError, KeyError):
-                self.out.warning("model response unparsable — falling back to heuristics")
+        if result is None:
+            # Model call failed — error details already printed by _call_model.
+            # This is fatal; don't silently fall back to heuristics.
+            self.out.fatal("cannot proceed without a working model connection")
+            sys.exit(1)
 
-        # --- heuristic fallback ---
-        self.out.warning("using heuristic plan (no model configured)")
+        # Try to extract JSON from the response
+        result = result.strip()
+        # Strip markdown code fences if present
+        if result.startswith("```"):
+            result = re.sub(r'^```(?:json)?\n?', '', result)
+            result = re.sub(r'\n?```$', '', result)
+            result = result.strip()
+        try:
+            plan = json.loads(result)
+            if isinstance(plan, list):
+                # Validate structure
+                for step in plan:
+                    if not isinstance(step, dict) or "action" not in step:
+                        raise ValueError("bad step")
+                self.out.success("plan generated by model")
+                return plan
+        except (json.JSONDecodeError, ValueError, KeyError):
+            self.out.warning("model response unparsable — falling back to heuristics")
+
+        # --- heuristic fallback (only on unparsable response, not on API failure) ---
         return self._heuristic_plan(task)
 
     def _heuristic_plan(self, task: str) -> list[dict]:
@@ -1619,8 +1679,8 @@ def main():
         help="Set a model config value (model, base_url, key), or show current values with no args",
     )
     parser.add_argument("-m", "--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
-    parser.add_argument("--base-url", help="Override base_url for this run")
-    parser.add_argument("--key", help="Override API key for this run")
+    parser.add_argument("-b", "--base-url", help="Override base_url for this run")
+    parser.add_argument("-k", "--key", help="Override API key for this run")
     parser.add_argument(
         "-c", "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
         help="Config directory (default: .local/agent-cli)",
@@ -1630,16 +1690,21 @@ def main():
         help="Auto-approve tool symlinks (non-interactive mode)",
     )
     parser.add_argument(
-        "--skills", nargs="?", const="__all__", metavar="SKILL",
+        "-l", "--skills", nargs="?", const="__all__", metavar="SKILL",
         help="List skills, or show detail for a specific skill",
     )
     parser.add_argument(
         "-d", "--delete", metavar="SKILL",
         help="Delete a skill so it won't be used and must be re-learned",
     )
+    parser.add_argument(
+        "--curlify", action="store_true",
+        help="Print the curl equivalent of the model API call for debugging",
+    )
 
     args = parser.parse_args()
     agent = AgentCLI(config_dir=args.config_dir, auto_yes=args.yes)
+    agent._curlify_mode = args.curlify
 
     # --set
     if args.set is not None:

@@ -33,5 +33,5 @@ Homepage = "https://github.com/example/agent-cli"
 agent-cli = "agent_cli:main"
 ac = "agent_cli:main"
 
-[tool.setuptools]
-py-modules = ["agent_cli"]
+[tool.setuptools.packages.find]
+include = ["agent_cli*"]

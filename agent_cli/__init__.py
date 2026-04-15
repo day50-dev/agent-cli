@@ -141,9 +141,20 @@ class Output:
     When streamdown is unavailable, a plain-text fallback is used.
     Tool output lines and interactive prompts bypass markdown rendering
     since their content is arbitrary / needs stdin interaction.
+
+    Log levels control verbosity during task execution:
+      WARN  — only the task, result summary, and outcome (default)
+      INFO  — plus section headers, step descriptions, and notes  (-v)
+      DEBUG — plus tool stdout/stderr, commands, subsections       (-vv)
     """
 
-    def __init__(self):
+    # Log levels — higher = more verbose
+    WARN = 0
+    INFO = 1
+    DEBUG = 2
+
+    def __init__(self, level: int = 0):
+        self.level = level
         self._sd = None
         try:
             from streamdown import Streamdown
@@ -175,15 +186,19 @@ class Output:
     # ---- semantic primitives ----
 
     def headline(self, text: str) -> None:
-        """Top-level task title — the main thing happening."""
-        self._render(f"# {text}\n\n")
+        """Top-level task title — shown at INFO level and above."""
+        if self.level >= self.INFO:
+            self._render(f"# {text}\n\n")
 
     def section(self, text: str) -> None:
-        """Sub-step / phase header — groups related output."""
-        self._render(f"\n### {text}\n")
+        """Sub-step / phase header — shown at INFO level and above."""
+        if self.level >= self.INFO:
+            self._render(f"\n### {text}\n")
 
     def subsection(self, text: str) -> None:
-        self._render(f"\n#### {text}\n")
+        """Sub-step detail — only shown at DEBUG level."""
+        if self.level >= self.DEBUG:
+            self._render(f"\n#### {text}\n")
 
     def success(self, text: str) -> None:
         """Positive outcome: approved, completed, confirmed."""
@@ -198,16 +213,19 @@ class Output:
         self._render(f"✗ **{text}**\n")
 
     def info(self, text: str) -> None:
-        """Neutral informational note."""
-        self._render(f"* {text}\n")
+        """Neutral informational note — shown at INFO level and above."""
+        if self.level >= self.INFO:
+            self._render(f"* {text}\n")
 
     def command(self, text: str) -> None:
-        """A command about to be executed."""
-        self._render(f"- {_md_escape(text)}\n")
+        """A command about to be executed — only shown at DEBUG level."""
+        if self.level >= self.DEBUG:
+            self._render(f"- {_md_escape(text)}\n")
 
     def output(self, text: str) -> None:
-        """Captured output line from a tool."""
-        self._render(f"> {_md_escape(text)}\n")
+        """Captured output line from a tool — only shown at DEBUG level."""
+        if self.level >= self.DEBUG:
+            self._render(f"> {_md_escape(text)}\n")
 
     def prompt(self, text: str, end: str = "\n") -> None:
         """User interaction prompt."""
@@ -215,10 +233,15 @@ class Output:
         print(f"\n  ? {text}", end=end)
 
     def separator(self) -> None:
-        """Horizontal rule separating major sections."""
-        self._render("---\n\n")
+        """Horizontal rule separating major sections — shown at INFO level and above."""
+        if self.level >= self.INFO:
+            self._render("---\n\n")
 
     # ---- compound helpers ----
+
+    def result(self, text: str) -> None:
+        """Final result / answer to the user's task — always shown, no prefix marker."""
+        self._render(f"{text}\n")
 
     def kv(self, key: str, value: str) -> None:
         """Key-value pair in a detail view (left-aligned label + value)."""
@@ -299,7 +322,8 @@ class Spinner:
 class AgentCLI:
     """Main agent-cli class."""
 
-    def __init__(self, config_dir: Optional[Path] = None, auto_yes: bool = False):
+    def __init__(self, config_dir: Optional[Path] = None, auto_yes: bool = False,
+                 verbose: int = 0):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.auto_yes = auto_yes
         self.tools_dir = self.config_dir / "tools"
@@ -312,7 +336,7 @@ class AgentCLI:
             "key": None,
         }
 
-        self.out = Output()
+        self.out = Output(level=Output.DEBUG if verbose >= 2 else (Output.INFO if verbose >= 1 else Output.WARN))
         self._skills_migrated = False
         self._curlify_mode = False
 
@@ -350,7 +374,7 @@ class AgentCLI:
 
     def show_model_config(self):
         """Display current model configuration values."""
-        self.out.section("Model Config")
+        self.out.markdown("### Model Config\n")
         for key, value in self.model_config.items():
             self.out.kv(key, value or "(not set)")
 
@@ -482,7 +506,7 @@ class AgentCLI:
         link = task_bin / name
 
         if auto_yes:
-            self.out.success(f"symlink  {name} → {path}  [{task}]")
+            self.out.info(f"symlink  {name} → {path}  [{task}]")
         else:
             self.out.prompt(f"Allow '{name}' ({path})?  category: [{task}]  (y/n): ", end="")
             resp = sys.stdin.readline().strip().lower()
@@ -1038,7 +1062,7 @@ class AgentCLI:
             self.out.fatal(f"unresolved parameters: {', '.join(set(unresolved))}")
             return False, ""
 
-        self.out.success(f"executing skill: {full.get('name', skill_meta['name'])}")
+        self.out.info(f"executing skill: {full.get('name', skill_meta['name'])}")
         if extracted_params:
             param_str = ", ".join(f"{k}={v}" for k, v in extracted_params.items())
             self.out.info(f"params: {param_str}")
@@ -1083,11 +1107,16 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Success condition
     # ------------------------------------------------------------------
-    def _verify_success(self, task: str, success_condition: str, captured_output: str) -> bool:
-        """Ask the LLM to verify whether the tool output satisfies the success condition."""
+    def _verify_success(self, task: str, success_condition: str, captured_output: str) -> tuple[bool, str]:
+        """Ask the LLM to verify whether the tool output satisfies the success condition.
+
+        Returns (satisfied, result_summary) where result_summary is a
+        concise human-readable answer derived from the tool output
+        (e.g. "The CPU is AMD Ryzen 7 and the memory is 16GB").
+        """
         if not captured_output.strip():
             self.out.fatal("no output produced — cannot verify success")
-            return False
+            return False, ""
 
         # Truncate output to avoid excessive token usage.
         # When there are multiple steps, cap each step's contribution so
@@ -1119,7 +1148,7 @@ class AgentCLI:
             "Tool output:\n"
             f"```\n{output_for_llm}\n```\n\n"
             'Respond in this JSON format:\n'
-            '{"satisfied": true/false, "reason": "brief explanation"}'
+            '{"satisfied": true/false, "reason": "brief explanation", "result": "concise human-readable answer to the task"}'
         )
 
         result = self._call_model([
@@ -1129,7 +1158,7 @@ class AgentCLI:
 
         if result is None:
             self.out.warning("verification call failed — cannot confirm success")
-            return False
+            return False, ""
 
         result = result.strip()
         if result.startswith("```"):
@@ -1141,15 +1170,16 @@ class AgentCLI:
             parsed = json.loads(result)
             satisfied = parsed.get("satisfied", False)
             reason = parsed.get("reason", "")
+            result_summary = parsed.get("result", "")
             if satisfied:
-                self.out.success(f"verified: {reason}")
-                return True
+                self.out.info(f"verified: {reason}")
+                return True, result_summary
             else:
                 self.out.fatal(f"verification failed: {reason}")
-                return False
+                return False, result_summary
         except (json.JSONDecodeError, ValueError):
             self.out.warning("verification response unparseable — cannot confirm success")
-            return False
+            return False, ""
 
     # ------------------------------------------------------------------
     # LLM inference
@@ -1217,6 +1247,7 @@ class AgentCLI:
     def _print_api_diagnostics(self, url: str):
         """Print url, model, and masked key after an API failure."""
         key_masked = self.model_config["key"][:4] + "****" if self.model_config.get("key") else "(none)"
+        self.out.markdown("### API Diagnostics\n")
         self.out.kv("url", url)
         self.out.kv("model", self.model_config.get("model", "(none)"))
         self.out.kv("key", key_masked)
@@ -1374,7 +1405,7 @@ class AgentCLI:
             for step in plan:
                 if not isinstance(step, dict) or "action" not in step:
                     raise ValueError("bad step")
-            self.out.success("plan generated by model")
+            self.out.info("plan generated by model")
             return plan, success_condition
         except (json.JSONDecodeError, ValueError, KeyError):
             self.out.fatal("model response was not valid JSON — cannot proceed")
@@ -1393,17 +1424,17 @@ class AgentCLI:
             self.out.section(f"validate  step {i + 1}: {step['action']}")
 
             if tool in available:
-                self.out.success(f"tool '{tool}' available")
-            elif self.discover_tool(tool):
-                # Known system tool not yet symlinked — offer to add it
+                self.out.info(f"tool '{tool}' available")
+            elif shutil.which(tool):
+                # Tool exists on PATH — just symlink it
                 if self.symlink_tool(tool, auto_yes=self.auto_yes):
-                    self.out.success(f"tool '{tool}' linked and ready")
+                    self.out.info(f"tool '{tool}' linked and ready")
                     available.add(tool)  # update for subsequent checks
                 else:
                     self.out.fatal(f"cannot proceed without '{tool}'")
                     return False
             else:
-                self.out.fatal(f"model returned unknown tool '{tool}' — not in available tools and not found on system")
+                self.out.fatal(f"tool '{tool}' not found on system — install it or check the name")
                 return False
         return True
 
@@ -1446,10 +1477,10 @@ class AgentCLI:
         skill = self._find_applicable_skill(task)
         skill_success_condition = None
         if skill:
-            self.out.success(f"match: {skill['name']}  ({skill.get('success_count', 0)}× success)")
+            self.out.info(f"skill match: {skill['name']}")
 
             # 2. Apply skill — capture output for verification
-            self.out.section("applying skill")
+            self.out.section("Applying")
             ok, captured = self.apply_skill(skill)
             if ok:
                 # Load the skill's saved success condition for verification
@@ -1464,15 +1495,18 @@ class AgentCLI:
                     skill_success_condition = skill_success_condition.replace(f"{{{{{pname}}}}}", pval)
 
                 if skill_success_condition:
-                    self.out.section("verify")
-                    if self._verify_success(task, skill_success_condition, captured):
+                    self.out.section("Verifying")
+                    ok, result_summary = self._verify_success(task, skill_success_condition, captured)
+                    if ok:
                         self.out.separator()
-                        self.out.success(f"SUCCESS  {skill_success_condition}")
+                        if result_summary:
+                            self.out.result(result_summary)
+                        self.out.info(skill_success_condition)
                         return
                 else:
                     # No saved condition — can't verify, assume ok
                     self.out.separator()
-                    self.out.success(f"skill completed: {skill['name']}")
+                    self.out.info(f"skill completed: {skill['name']}")
                     return
             self.out.warning("skill did not satisfy — falling back to plan")
         else:
@@ -1492,7 +1526,7 @@ class AgentCLI:
         if not self._validate_plan(plan):
             self.out.fatal("validation failed")
             sys.exit(1)
-        self.out.success("all steps valid")
+        self.out.info("all steps valid")
 
         # 5. Execute — capture output
         self.out.section("execute")
@@ -1500,13 +1534,18 @@ class AgentCLI:
 
         # 6. Verify against success condition & save skill
         self.out.section("verify")
-        if self._verify_success(task, success_condition, captured):
+        verified, result_summary = self._verify_success(task, success_condition, captured)
+        if verified:
             self.out.separator()
+            if result_summary:
+                self.out.result(result_summary)
             skill_path = self._save_skill(task, plan, success_condition, tools_in_plan, success=True)
-            self.out.success(f"SUCCESS  {success_condition}")
+            self.out.info(f"SUCCESS  {success_condition}")
             if skill_path:
-                self.out.success(f"skill saved → {Path(skill_path).name}")
+                self.out.info(f"skill saved → {Path(skill_path).name}")
         else:
+            if result_summary:
+                self.out.result(f"partial result: {result_summary}")
             self._save_skill(task, plan, success_condition, tools_in_plan, success=False)
             self.out.separator()
             self.out.fatal(f"FAILED  {success_condition}")
@@ -1594,9 +1633,13 @@ def main():
         "--curlify", action="store_true",
         help="Print the curl equivalent of the model API call for debugging",
     )
+    parser.add_argument(
+        "-v", "--verbose", action="count", default=0,
+        help="Increase verbosity: -v shows sections/steps, -vv shows all tool output",
+    )
 
     args = parser.parse_args()
-    agent = AgentCLI(config_dir=args.config_dir, auto_yes=args.yes)
+    agent = AgentCLI(config_dir=args.config_dir, auto_yes=args.yes, verbose=args.verbose)
     agent._curlify_mode = args.curlify
 
     # --set

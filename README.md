@@ -1,109 +1,197 @@
 # agent-cli
 
-**agent-cli** (alias: **ac**) is a one-shot command-line helper that automates scoped execution tasks. It runs in the foreground, provides clear visual feedback of its progress, uses isolation via symlinked tools, and learns new capabilities ("skills") through successful task execution.
+> Your terminal. Any task. One command.
 
-## Core Concepts
-
-### Tool Isolation & Discovery
-Instead of accessing your entire system PATH, the agent uses a minimal set of tools symlinked in a config directory (defaults to `~/.local/agent-cli/tools/{category}/bin` on Linux).
-
-- **Default Tools:** Starts with `whatis`, `apropos`, `man`, `pydoc` (for documentation/discovery) and `cat`, `head`, `tail`, `ls` (for basic inspection).
-- **Discovery:** When a task requires a new tool (e.g., `git`), the agent uses `whatis` or `apropos` to find it on your system and asks for permission to symlink it into its scoped environment.
-- **Classification:** Tools are automatically categorized into groups like `vcs`, `build`, `text`, `net`, `sys`, etc.
-
-### Skills (Learning)
-When the agent successfully completes a task, it automatically generalizes the plan and saves it as a **Skill** — following the [Agent Skills standard](https://agentskills.io) for interoperability with the Anthropic Claude skill ecosystem.
-
-Skills are stored as directories under `~/.local/agent-cli/skills/`:
-
-```
-skills/
-  clone-repository/
-    SKILL.md          # YAML frontmatter (name, description) + instructions
-    plan.json         # Machine-readable: plan, params_map, task_regex, etc.
+```bash
+ac "clone github.com/psf/requests as requests && list the top-level files"
 ```
 
-- **SKILL.md** — Anthropic-compatible skill definition with YAML frontmatter (`name`, `description`, `allowed-tools`) and a markdown body describing when/how to use the skill. This file can be imported/exported to other skill-compatible tools.
-- **plan.json** — Machine-readable execution data: the parameterized plan step list, `task_regex` for matching future tasks, `params_map` for parameter extraction, success conditions, and run statistics.
-- **Parameterization:** Skills automatically extract variables (like URLs or directory names) from the task description. URL schemes (`https://`) are handled flexibly — the skill matches tasks with or without the prefix.
-- **Reuse:** The next time you ask for a similar task, the agent matches the `task_regex` pattern, extracts parameters, and executes the saved plan with new values.
-- **Reliability:** Skills track their success count, helping you identify the most reliable automated workflows.
-
-### Custom Programs
-If a task cannot be achieved with existing system tools, the agent can write a custom Python program (stored in `tools/custom/bin`) to handle the logic.
+You describe what you want. `ac` figures out the tools, asks before touching anything new, executes step-by-step, and saves the winning plan as a reusable skill for next time.
 
 ---
 
-## Agent Flow
+## Install
 
-1.  **Success Condition:** Analyzes the task and current directory to define what "success" looks like (e.g., "a new directory named X exists").
-2.  **Skill Match:** Checks if any existing skill matches the task using `task_regex` patterns.
-3.  **Apply Skill:** If a match is found, it extracts parameters and executes the saved plan.
-4.  **Plan Generation:** If no skill applies (or the skill fails to satisfy the success condition), the agent generates a new plan using a Large Language Model (LLM) or internal heuristics.
-5.  **Validation:** Before execution, it verifies all required tools are available and symlinked.
-6.  **Execution:** Steps through the plan, running tools and showing output.
-7.  **Verification & Learning:** Checks the success condition. If passed, it saves the plan as a new, reusable skill in SKILL.md directory format.
+```bash
+pipx install agent-cli
+# or: pip install --user agent-cli
+```
+
+Then point it at any OpenAI-compatible API:
+
+```bash
+ac -s model "gpt-4o"
+ac -s base_url "https://api.openai.com/v1"
+ac -s key "sk-..."
+```
+
+---
+
+## Try it now
+
+```bash
+# Run a one-shot task
+ac "list all files in the current directory"
+
+# No arguments → show current status (tools, skills, config)
+ac
+```
+
+`ac` and `agent-cli` are interchangeable — `ac` is the short alias.
+
+---
+
+## What happens when you run a task
+
+1. **Defines success** — before touching anything, the agent decides what "done" looks like.
+2. **Checks skills** — if you've run something similar before, it reuses the saved plan.
+3. **Discovers tools** — needs `git`? It finds it on your system and asks permission to symlink it in.
+4. **Executes step-by-step** — each action is visible; nothing runs silently in the background.
+5. **Learns** — on success, the plan is saved as a skill so the next similar task is instant.
+
+---
+
+## Tool isolation
+
+Instead of reaching into your full system `PATH`, `ac` works with a minimal set of symlinked tools under its config directory:
+
+```
+~/.local/agent-cli/tools/
+  doc/bin/    whatis  apropos  man  pydoc
+  find/bin/   cat  head  tail  ls
+  vcs/bin/    git          ← symlinked on first use, after you say yes
+  build/bin/  npm  pip  …
+```
+
+When a task needs a new tool, the agent finds it with `whatis`/`apropos` and prompts you:
+
+```
+  ? allow symlink: git → tools/vcs/bin/git  [y/N]
+```
+
+Use `-y` / `--yes` to pre-approve all symlinks for non-interactive runs:
+
+```bash
+ac -y "clone github.com/user/repo as my-repo"
+```
+
+---
+
+## Skills
+
+Every successful task is saved as a **skill** — an [Anthropic-compatible](https://agentskills.io) `SKILL.md` + `plan.json` pair under your config directory:
+
+```
+~/.local/agent-cli/skills/
+  clone-repository/
+    SKILL.md      # YAML frontmatter + instructions (importable to other tools)
+    plan.json     # parameterized plan, task_regex, params_map, success condition
+```
+
+Variables (URLs, names, paths) are extracted automatically so the same skill works on new inputs without re-planning.
+
+### Skill commands
+
+```bash
+ac --skills                   # list all saved skills
+ac --skills clone-repository  # show detail: instructions, plan, regex, params
+ac -d clone-repository        # delete a bad skill so it re-learns from scratch
+```
 
 ---
 
 ## Configuration
 
-**agent-cli** is model and provider agnostic. It supports any OpenAI-compatible API. Configuration is stored at `~/.local/agent-cli/config.json`.
+Config lives at `~/.local/agent-cli/config.json` (path varies by platform — see table below).
 
-### Model Setup
-Set your API configuration using the `-s` / `--set` command:
+### Set values
+
 ```bash
-$ ac -s model "gpt-4o"
-$ ac -s base_url "https://api.openai.com/v1"
-$ ac -s key "your-api-key"
+ac -s model "gpt-4o"
+ac -s base_url "https://api.openai.com/v1"
+ac -s key "sk-..."
+ac -s                          # show current values (key is masked)
 ```
 
-Run `ac -s` with no arguments to show current values (API key is masked).
+`base_url` is auto-corrected — if it doesn't already end with `/v1` or `/v1beta`, `/v1` is appended:
 
-The `base_url` is auto-corrected: if it doesn't already end with a versioned path like `/v1` or `/v1beta`, `/v1` is appended automatically. So you can set just the domain:
 ```bash
-$ ac -s base_url "https://integrate.api.nvidia.com"
-# → resolves to https://integrate.api.nvidia.com/v1
+ac -s base_url "https://integrate.api.nvidia.com"
+# → stored as https://integrate.api.nvidia.com/v1
 ```
 
-### List Available Models
-Run `-m` / `--model` with no value to query the `/models` endpoint and see what's available — useful for verifying your `base_url` and key are correct:
+### List available models
+
+Run `-m` with no value to query the `/models` endpoint — useful for verifying your key and `base_url`:
+
 ```bash
-$ ac -m
-  ✓ models available at https://api.openai.com/v1:
-  · gpt-4o  (openai)
-  · gpt-4o-mini  (openai)
+ac -m
+#   ✓ models available at https://api.openai.com/v1:
+#   · gpt-4o  (openai)
+#   · gpt-4o-mini  (openai)
 ```
 
-### One-shot Overrides
-You can override configuration for a single run:
+### One-shot overrides
+
+Override model, base URL, or key for a single run without changing saved config:
+
 ```bash
-$ ac -m "claude-3" "clone this repo: https://github.com/user/repo"
+ac -m "gpt-4o-mini" "summarise this repo in 10 bullets"
+ac -b "https://my-proxy.example.com/v1" -k "sk-..." "list all files"
 ```
 
----
+### Debug: see the raw API call
 
-## Usage
+```bash
+ac --curlify "say hi"
+# prints the equivalent curl command before executing
+```
 
-### Examples
-- `ac "clone github.com/akash-network/node as akash-node"`
-- `ac "list all files in the current directory"`
-- `ac "read the content of README.md"`
-- `agent-cli` and `ac` are interchangeable — `ac` is the short alias.
+### Config directory
 
-### Management Commands
-- **List Skills:** `ac --skills`
-- **Skill Detail:** `ac --skills <skill-name>` — shows SKILL.md instructions, parameters, plan, and matching regex
-- **Delete a Skill:** `ac -d <skill-name>` — removes a bad skill so it must be re-learned from scratch
-- **Auto-approve:** Use `-y` / `--yes` to skip confirmation prompts for symlinking tools.
-- **Status:** Running `ac` without arguments shows the current tool and skill status.
-
-### Config Location
-The config directory defaults to `site.USER_BASE/agent-cli`:
-
-| Platform | Path |
+| Platform | Default path |
 |---|---|
 | Linux | `~/.local/agent-cli/` |
 | macOS (framework build) | `~/Library/Python/3.x/agent-cli/` |
 | macOS (non-framework) | `~/.local/agent-cli/` |
-| Override | `-c <path>` / `--config-dir <path>` or `PYTHONUSERBASE=<dir>` |
+| Override | `-c <path>` / `--config-dir <path>` |
+
+---
+
+## Quick reference
+
+| Command | What it does |
+|---|---|
+| `ac "<task>"` | Run a one-shot task |
+| `ac` | Show status (tools, skills, config) |
+| `ac -s model "gpt-4o"` | Set default model |
+| `ac -s base_url "…"` | Set default API base URL |
+| `ac -s key "…"` | Set default API key |
+| `ac -s` | Show current config values |
+| `ac -m` | List models at current base URL |
+| `ac -m "model" "<task>"` | Run task with a different model |
+| `ac -b "url" "<task>"` | Run task with a different base URL |
+| `ac -k "key" "<task>"` | Run task with a different API key |
+| `ac --skills` | List saved skills |
+| `ac --skills <name>` | Show skill detail |
+| `ac -d <name>` | Delete a skill |
+| `ac -y "<task>"` | Auto-approve all tool symlinks |
+| `ac -c <path> "<task>"` | Use a different config directory |
+| `ac --curlify "<task>"` | Print the raw API call as curl |
+
+---
+
+## Contributing
+
+If you've run a task and thought "that should just work" — open an issue with:
+- what you typed
+- what you expected
+- what actually happened
+
+PRs welcome.
+
+---
+
+## License
+
+MIT

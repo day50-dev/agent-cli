@@ -688,8 +688,8 @@ class AgentCLI:
             if len(parts) <= 2:
                 # Short, generic action like 'clone_repository' — use as-is
                 return name.replace("_", "-")
-            # Over-specific — keep only the verb (first part)
-            return parts[0]
+            # Over-specific — keep verb + first noun (e.g. install_python)
+            return "_".join(parts[:2])
         return "generic-task"
 
     def _infer_param_name(self, value: str) -> str:

@@ -673,11 +673,23 @@ class AgentCLI:
         """Derive a generalized skill name from the plan's primary action.
 
         E.g. plan with action 'clone_repository' → 'clone-repository'
+
+        The action should be a generic verb (the function), not the subject.
+        As a safety net, if the action is over-specific (3+ underscore
+        parts like 'clone_the_akash_network'), only the verb part is
+        kept ('clone').
         """
         for step in plan:
             action = step.get("action", "")
-            if action:
-                return action.replace("_", "-").lower()
+            if not action:
+                continue
+            name = action.replace("-", "_").lower()
+            parts = name.split("_")
+            if len(parts) <= 2:
+                # Short, generic action like 'clone_repository' — use as-is
+                return name.replace("_", "-")
+            # Over-specific — keep only the verb (first part)
+            return parts[0]
         return "generic-task"
 
     def _infer_param_name(self, value: str) -> str:
@@ -892,8 +904,18 @@ class AgentCLI:
         param_condition = self._parameterize_success_condition(success_condition, params_map)
 
         # Build a human-readable description from the plan
-        actions = [s.get("action", "?") for s in param_plan]
-        desc = f"Auto-learned skill: {', '.join(actions)}"
+        # Deduplicate actions: clone_repository ×2 instead of clone_repository, clone_repository
+        action_counts: dict[str, int] = {}
+        for s in param_plan:
+            a = s.get("action", "?")
+            action_counts[a] = action_counts.get(a, 0) + 1
+        desc_parts = []
+        for a, count in action_counts.items():
+            if count > 1:
+                desc_parts.append(f"{a} (×{count})")
+            else:
+                desc_parts.append(a)
+        desc = f"Auto-learned skill: {', '.join(desc_parts)}"
 
         # Write SKILL.md (Anthropic format)
         skill_dir.mkdir(parents=True, exist_ok=True)
@@ -1295,9 +1317,11 @@ class AgentCLI:
             "You are a task planner for a command-line agent. "
             "Given a user task, available system tools, and directory context, "
             "produce a JSON array of plan steps. Each step is an object with:\n"
-            '  - "action": short description string\n'
+            '  - "action": a GENERIC verb-only description of the step (e.g. "clone_repository", "install_package", "list_directory"). '
+            '    Do NOT include specific URLs, names, or values — those go in "args". '
+            '    The action is the function; the args are the parameters.\n'
             '  - "tool": tool name (from the available list), or null to write a custom program\n'
-            '  - "args": list of string arguments for that tool\n'
+            '  - "args": list of string arguments for that tool (this is where specific values go)\n'
             "Return ONLY valid JSON, no markdown, no explanation.\n"
             "If the task involves cloning repos, create one step per repo. "
             "If a directory name is specified (e.g., 'as dir_name'), use it as the last argument."

@@ -348,7 +348,7 @@ class AgentCLI:
 
     def show_model_config(self):
         """Display current model configuration values."""
-        self.out.section("model config")
+        self.out.section("Model Config")
         for key, value in self.model_config.items():
             if key == "key" and value:
                 # Mask the API key for security
@@ -1238,7 +1238,7 @@ class AgentCLI:
             self.out.info(f"no models returned from {url}")
             return
 
-        md = f"### models at {base_url}\n\n"
+        md = f"### Models at {base_url}\n"
         for m in sorted(models, key=lambda x: x.get("id", "")):
             mid = m.get("id", "?")
             owner = m.get("owned_by", "")
@@ -1574,7 +1574,7 @@ if __name__ == "__main__":
         self.out.info(success['description'])
 
         # 2. Check for applicable skills
-        self.out.section("skills")
+        self.out.section("Skills")
         skill = self._find_applicable_skill(task)
         if skill:
             self.out.success(f"match: {skill['name']}  ({skill.get('success_count', 0)}× success)")
@@ -1636,7 +1636,7 @@ if __name__ == "__main__":
     def _skills_markdown(self) -> str:
         """Build a markdown skills section string."""
         skills = self.get_available_skills()
-        md = "### skills\n\n"
+        md = "### Skills\n"
         if not skills:
             md += "*none yet — they are saved automatically on success*\n"
             return md

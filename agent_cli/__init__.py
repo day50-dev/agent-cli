@@ -95,7 +95,7 @@ def classify_tool(name: str) -> str:
     return TOOL_TASK_CLASSIFIER.get(name, "general")
 
 
-# ANSI escape codes — module-level so Output and Spinner share them.
+# ANSI escape codes — module-level for use by Spinner animation.
 _ANSI_BOLD   = "\033[1m"
 _ANSI_DIM    = "\033[2m"
 _ANSI_RESET  = "\033[0m"
@@ -118,91 +118,120 @@ STATIC_COMMAND_WORDS = {
 
 
 # ------------------------------------------------------------------
+# Markdown helpers
+# ------------------------------------------------------------------
+
+def _md_escape(text: str) -> str:
+    """Escape backtick characters for safe use inside markdown code spans."""
+    return text.replace('`', r'\`')
+
+
+# ------------------------------------------------------------------
 # Output primitives — semantic abstractions for CLI display
 # ------------------------------------------------------------------
 
 class Output:
     """Semantic output layer for CLI display.
 
-    Instead of scattering marker constants and raw print() calls everywhere,
-    code expresses intent through semantic primitives like headline(),
-    section(), success(), fatal(), etc.  This centralises styling,
-    ensures visual consistency, and makes it trivial to retarget output
-    (e.g. JSON, logfmt, no-color mode) later.
+    All output is rendered as markdown via streamdown for polished
+    terminal presentation.  Each semantic primitive (headline, section,
+    success, fatal, etc.) maps to a small markdown fragment rendered
+    through a persistent Streamdown instance.
+
+    When streamdown is unavailable, a plain-text fallback is used.
+    Tool output lines and interactive prompts bypass markdown rendering
+    since their content is arbitrary / needs stdin interaction.
     """
 
-    def __init__(self, no_color: bool = False):
-        self._no_color = no_color or not sys.stdout.isatty()
+    def __init__(self):
+        self._sd = None
+        try:
+            from streamdown import Streamdown
+            self._sd = Streamdown()
+            import atexit
+            atexit.register(self._tidy)
+        except ImportError:
+            pass
 
-    def _c(self, code: str, text: str) -> str:
-        """Wrap *text* in ANSI *code* unless colour is disabled."""
-        if self._no_color:
-            return text
-        return f"{code}{text}{_ANSI_RESET}"
+    def _tidy(self):
+        """Clean up the Streamdown instance at program exit."""
+        if self._sd:
+            self._sd.tidyup()
+
+    def _render(self, text: str) -> None:
+        """Render a markdown fragment through streamdown, or fall back to print."""
+        if self._sd:
+            self._sd.render(text)
+        else:
+            # Fallback: strip basic markdown for plain-text display
+            clean = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+            clean = re.sub(r'\*(.+?)\*', r'\1', clean)
+            clean = re.sub(r'`(.+?)`', r'\1', clean)
+            # Collapse runs of 3+ blank lines into 1, but preserve
+            # single blank lines so sections stay visually separated.
+            clean = re.sub(r'\n{3,}', '\n\n', clean)
+            print(clean, end='')
 
     # ---- semantic primitives ----
 
     def headline(self, text: str) -> None:
         """Top-level task title — the main thing happening."""
-        marker = self._c(_ANSI_BOLD, "▸▸▸")
-        print(f"{marker} {self._c(_ANSI_BOLD, text)}")
+        self._render(f"# {text}\n\n")
 
     def section(self, text: str) -> None:
         """Sub-step / phase header — groups related output."""
-        marker = self._c(_ANSI_CYAN, "▹")
-        print(f"\n{marker} {self._c(_ANSI_BOLD, text)}")
+        self._render(f"### {text}\n\n")
 
     def success(self, text: str) -> None:
         """Positive outcome: approved, completed, confirmed."""
-        marker = self._c(_ANSI_GREEN, "✓")
-        print(f"  {marker} {text}")
+        self._render(f"✓ {text}\n\n")
 
     def warning(self, text: str) -> None:
         """Non-critical issue: degraded path, fallback, something to note."""
-        marker = self._c(_ANSI_YELLOW, "⚠")
-        print(f"  {marker} {self._c(_ANSI_YELLOW, text)}")
+        self._render(f"⚠ *{text}*\n\n")
 
     def fatal(self, text: str) -> None:
         """Critical failure: cannot proceed."""
-        marker = self._c(_ANSI_RED, "✗")
-        print(f"\n  {marker} {self._c(_ANSI_RED, text)}")
+        self._render(f"✗ **{text}**\n\n")
 
     def info(self, text: str) -> None:
         """Neutral informational note."""
-        marker = self._c(_ANSI_DIM, "·")
-        print(f"  {marker} {self._c(_ANSI_DIM, text)}")
+        self._render(f"* {text}\n\n")
 
     def command(self, text: str) -> None:
         """A command about to be executed."""
-        marker = self._c(_ANSI_BLUE, "➜")
-        print(f"\n  {marker} {self._c(_ANSI_BOLD, text)}")
+        self._render(f"➜ `{_md_escape(text)}`\n\n")
 
     def output(self, text: str) -> None:
         """Captured output line from a tool."""
-        print(f"  │ {self._c(_ANSI_DIM, text)}")
+        self._render(f"> {_md_escape(text)}\n\n")
 
     def prompt(self, text: str, end: str = "\n") -> None:
         """User interaction prompt."""
-        marker = self._c(_ANSI_YELLOW, "?")
-        print(f"\n  {marker} {text}", end=end)
+        # Interactive prompts need direct stdout — don't render as markdown.
+        print(f"\n  ? {text}", end=end)
 
     def separator(self) -> None:
         """Horizontal rule separating major sections."""
-        line = "─" * 60
-        print(self._c(_ANSI_DIM, line))
+        self._render("---\n\n")
 
     # ---- compound helpers ----
 
     def kv(self, key: str, value: str) -> None:
         """Key-value pair in a detail view (left-aligned label + value)."""
-        label = self._c(_ANSI_DIM, f"{key}:")
-        print(f"  · {label:14s} {value}")
+        self._render(f"**{key}:** `{_md_escape(value)}`\n\n")
+
+    # ---- markdown rendering (streamdown) ----
+
+    def markdown(self, text: str) -> None:
+        """Render a bulk markdown document through streamdown."""
+        self._render(text)
 
     # ---- spinner ----
 
     def spinner(self, label: str = "Thinking"):
         """Return a Spinner context manager animating while waiting."""
-        return Spinner(label, no_color=self._no_color)
+        return Spinner(label, no_color=not sys.stdout.isatty())
 
 
 class Spinner:
@@ -529,7 +558,7 @@ class AgentCLI:
             body = (
                 f"# {skill_name}\n\n"
                 f"{desc}\n\n"
-                f"## Parameters\n\n"
+                f"### Parameters\n\n"
                 "This skill is parameterized.  Values are extracted from the\n"
                 "user's task string via `task_regex` and substituted into the\n"
                 "plan before execution.\n"
@@ -934,7 +963,7 @@ class AgentCLI:
         params_section = ""
         if param_lines:
             params_section = (
-                "\n## Parameters\n\n"
+                "\n### Parameters\n\n"
                 "Values are extracted from the task string via `task_regex` "
                 "and substituted into the plan before execution.\n\n"
                 + "\n".join(param_lines) + "\n"
@@ -1209,14 +1238,15 @@ class AgentCLI:
             self.out.info(f"no models returned from {url}")
             return
 
-        self.out.success(f"models available at {base_url}:")
+        md = f"### models at {base_url}\n\n"
         for m in sorted(models, key=lambda x: x.get("id", "")):
             mid = m.get("id", "?")
             owner = m.get("owned_by", "")
-            line = mid
             if owner:
-                line += f"  ({owner})"
-            self.out.info(line)
+                md += f"- **{mid}**  ({owner})\n"
+            else:
+                md += f"- **{mid}**\n"
+        self.out.markdown(md)
 
     def _print_api_diagnostics(self, url: str):
         """Print url, model, and masked key after an API failure."""
@@ -1592,35 +1622,34 @@ if __name__ == "__main__":
             sys.exit(1)
 
     def show_status(self):
-        self.out.headline("agent-cli")
-        self.out.separator()
-
         tools = self.get_all_symlinked_tools()
-        self.out.section("tools")
+        md = "# agent-cli\n\n"
+        md += "### tools\n\n"
         for task, names in sorted(tools.items()):
-            self.out.info(f"{task}/bin/  {' '.join(names)}")
+            md += f"- **{task}/bin/** {'  '.join(names)}\n"
+        md += "\n"
+        md += self._skills_markdown()
+        md += "\n---\n\n"
+        md += "`ac '<task>'`  *  `ac --skills [name]`  *  `ac -d <skill>`  *  `ac -s model 'model-name'`\n"
+        self.out.markdown(md)
 
-        self._print_skills()
-
-        self.out.separator()
-        self.out.info("ac '<task>'")
-        self.out.info("ac --skills [name]")
-        self.out.info("ac -d <skill>  (delete)")
-        self.out.info("ac -s model 'model-name'")
+    def _skills_markdown(self) -> str:
+        """Build a markdown skills section string."""
+        skills = self.get_available_skills()
+        md = "### skills\n\n"
+        if not skills:
+            md += "*none yet — they are saved automatically on success*\n"
+            return md
+        for s in skills:
+            tools_str = f" [`{'`, `'.join(_md_escape(t) for t in s['tools_used'])}`]" if s.get("tools_used") else ""
+            md += f"- **{s['name']}**  {s['success_count']}×{tools_str}\n"
+            if s.get("description"):
+                md += f"  {s['description']}\n"
+        return md
 
     def _print_skills(self):
         """Print a formatted list of skills."""
-        skills = self.get_available_skills()
-        self.out.section("skills")
-        if not skills:
-            self.out.info("none yet — they are saved automatically on success")
-            return
-        for s in skills:
-            status = f"{s['success_count']}×"
-            tools_str = f" [{', '.join(s['tools_used'])}]" if s.get("tools_used") else ""
-            self.out.info(f"{s['name']:30s}  {status:12s}{tools_str}")
-            if s.get("description"):
-                self.out.info(s['description'])
+        self.out.markdown(self._skills_markdown())
 
     def _print_skill_detail(self, skill_name: str):
         """Print detailed information about a single skill."""
@@ -1634,11 +1663,8 @@ if __name__ == "__main__":
             self.out.fatal(f"skill '{skill_name}' has no data")
             return
 
-        self.out.headline(data.get('name', skill_name))
-        self.out.separator()
-
-        # Directory path
-        self.out.kv("dir", str(skill_dir))
+        md = f"# {data.get('name', skill_name)}\n\n"
+        md += f"**dir:** `{_md_escape(str(skill_dir))}`\n\n"
 
         # Show SKILL.md body (instructions)
         skill_md_path = skill_dir / "SKILL.md"
@@ -1647,58 +1673,60 @@ if __name__ == "__main__":
             # Strip frontmatter, show body only
             body = re.sub(r'^---\s*\n.*?\n---\s*\n', '', text, flags=re.DOTALL).strip()
             if body:
-                self.out.section("SKILL.md")
-                for line in body.splitlines()[:20]:
-                    self.out.info(line)
+                md += body + "\n\n"
 
         # Overview from plan.json
         desc = data.get("description", "")
         if desc:
-            self.out.kv("description", desc)
-        self.out.kv("success_count", f"{data.get('success_count', 0)}×")
+            md += f"**description:** {desc}\n\n"
+        md += f"**success_count:** {data.get('success_count', 0)}×\n\n"
         tools = data.get("tools_used", [])
         if tools:
-            self.out.kv("tools", ', '.join(tools))
+            md += f"**tools:** `{'`, `'.join(_md_escape(t) for t in tools)}`\n\n"
 
         # Pattern / regex
         regex = data.get("task_regex", "")
         pattern = data.get("task_pattern", "")
-        self.out.section("matching")
+        md += "### matching\n\n"
         if regex:
-            self.out.kv("task_regex", regex)
+            md += f"**task_regex:** `{_md_escape(regex)}`\n\n"
         if pattern:
-            self.out.kv("task_pattern", pattern)
+            md += f"**task_pattern:** `{_md_escape(pattern)}`\n\n"
 
         # Parameters
         params = data.get("params_map", {})
         if params:
-            self.out.section("parameters")
+            md += "### parameters\n\n"
             for orig, pname in params.items():
-                self.out.kv(pname, orig)
+                md += f"- **{pname}:** `{_md_escape(orig)}`\n"
+            md += "\n"
 
         # Plan
         plan = data.get("plan", [])
         if plan:
-            self.out.section("plan")
+            md += "### plan\n\n"
             for i, step in enumerate(plan):
                 tool = step.get("tool", "custom")
                 args = step.get("args", [])
                 args_str = ' '.join(args) if args else ''
-                self.out.info(f"step {i + 1}: {step.get('action', '?')}  ({tool})  {args_str}")
+                md += f"{i + 1}. **{step.get('action', '?')}**  (`{_md_escape(tool)}`) `{_md_escape(args_str)}`\n"
+            md += "\n"
 
         # Success condition
         condition = data.get("success_condition", {})
         if condition:
-            self.out.section("success condition")
+            md += "### success condition\n\n"
             cond_desc = condition.get("description", "")
             if cond_desc:
-                self.out.info(cond_desc)
+                md += f"> {cond_desc}\n\n"
             ctype = condition.get("type", "")
             if ctype:
-                self.out.kv("type", ctype)
+                md += f"**type:** `{_md_escape(ctype)}`\n\n"
             for key in ("expect_dirs", "expect_dir"):
                 if key in condition:
-                    self.out.kv(key, str(condition[key]))
+                    md += f"**{key}:** `{_md_escape(str(condition[key]))}`\n\n"
+
+        self.out.markdown(md)
 
 
 def main():

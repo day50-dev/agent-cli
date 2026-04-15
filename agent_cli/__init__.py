@@ -453,28 +453,87 @@ class AgentCLI:
                     return 1, "", str(e)
         return 1, "", f"Tool '{tool}' not found in symlinked tools"
 
-    def discover_tool(self, name: str) -> bool:
-        """
-        Use the minimal discovery tools (whatis, apropos) to check whether
-        *name* is available on the system.  Does NOT search the filesystem
-        beyond what these unix utilities do.
-        """
-        # 1. Check if already symlinked
-        if name in self.all_tool_names():
-            return True
+    def _system_search_tool(self, name: str) -> bool:
+        """Search for *name* via whatis/apropos — last-resort RAG fallback.
 
-        # 2. Try whatis
+        Called by _resolve_tool() only after PATH checks and LLM
+        consultation have already failed.
+        """
         rc, out, _ = self._run_symlinked("whatis", [name])
         if rc == 0 and out.strip() and "nothing appropriate" not in out.lower():
             return True
-
-        # 3. Try apropos (partial match)
         rc, out, _ = self._run_symlinked("apropos", [name])
         if rc == 0 and name in out.lower():
             return True
+        return False
 
-        # 4. Fallback: check PATH directly
-        return shutil.which(name) is not None
+    def _resolve_tool(self, tool: str, action: str) -> Optional[str]:
+        """Resolve a tool needed by a plan step.
+
+        Resolution order:
+          1. Already symlinked → return as-is
+          2. On PATH → symlink and return as-is
+          3. Ask the LLM for an alternative → if suggested tool is on PATH, use that
+          4. Fall back to apropos/whatis system search (RAG)
+
+        Returns the resolved tool name (may differ from *tool* if the LLM
+        suggested an alternative), or None if unresolvable.
+        """
+        # 1. Already symlinked
+        if tool in self.all_tool_names():
+            return tool
+
+        # 2. On PATH — just symlink it
+        if shutil.which(tool):
+            if self.symlink_tool(tool, auto_yes=self.auto_yes):
+                return tool
+            return None
+
+        # 3. Ask the LLM — it may know an alternative that IS on this system
+        self.out.info(f"tool '{tool}' not on PATH — asking model for alternative")
+        resolved = self._llm_resolve_tool(tool, action)
+        if resolved and resolved != tool and shutil.which(resolved):
+            self.out.info(f"model suggests '{resolved}' instead of '{tool}'")
+            if self.symlink_tool(resolved, auto_yes=self.auto_yes):
+                return resolved
+
+        # 4. Last resort: system search via whatis/apropos
+        self.out.info("falling back to system search (apropos/whatis)")
+        if self._system_search_tool(tool):
+            if self.symlink_tool(tool, auto_yes=self.auto_yes):
+                return tool
+
+        return None
+
+    def _llm_resolve_tool(self, tool: str, action: str) -> Optional[str]:
+        """Ask the LLM what tool to use for *action* when *tool* isn't available.
+
+        Returns a tool name string, or None if the LLM doesn't know.
+        """
+        system_prompt = (
+            "You are a Unix system expert. The planned tool is not installed "
+            "on this system. Suggest an alternative tool that is commonly "
+            "available and can accomplish the same task, or respond 'unknown' "
+            "if you cannot think of one. Respond ONLY with the tool name "
+            "(no arguments, no explanation) or 'unknown'."
+        )
+        user_prompt = (
+            f"Planned tool: {tool}\n"
+            f"Action: {action}\n"
+            "What alternative tool should be used?"
+        )
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        if result is None:
+            return None
+        result = result.strip().lower()
+        if result == "unknown" or not result:
+            return None
+        # Sanitize: take only the first word, strip non-alphanumeric
+        match = re.match(r'^[a-zA-Z][\w-]*', result)
+        return match.group(0) if match else None
 
     def find_tool_path(self, name: str) -> Optional[str]:
         """Return the absolute PATH location of *name* if it exists."""
@@ -1073,13 +1132,12 @@ class AgentCLI:
         for i, step in enumerate(resolved_plan):
             tool = step.get("tool")
             if tool and tool not in self.all_tool_names():
-                if self.discover_tool(tool):
-                    if not self.symlink_tool(tool, auto_yes=self.auto_yes):
-                        self.out.fatal(f"cannot proceed without '{tool}'")
-                        return False, ""
-                else:
+                resolved = self._resolve_tool(tool, step.get('action', ''))
+                if resolved is None:
                     self.out.fatal(f"tool '{tool}' not available on this system")
                     return False, ""
+                if resolved != tool:
+                    step["tool"] = resolved
 
         # Execute — capture output for verification
         captured = []
@@ -1413,8 +1471,12 @@ class AgentCLI:
 
 
     def _validate_plan(self, plan: list[dict]) -> bool:
-        """Validate that every step uses a tool from the available list."""
-        available = self.all_tool_names()
+        """Validate that every step uses a tool that can be resolved.
+
+        Uses _resolve_tool() which tries PATH → LLM alternative → apropos
+        before giving up.  If the LLM suggests a different tool, the
+        plan step is rewritten in-place to use the alternative.
+        """
         for i, step in enumerate(plan):
             tool = step.get("tool")
             if not tool:
@@ -1423,19 +1485,17 @@ class AgentCLI:
 
             self.out.section(f"validate  step {i + 1}: {step['action']}")
 
-            if tool in available:
-                self.out.info(f"tool '{tool}' available")
-            elif shutil.which(tool):
-                # Tool exists on PATH — just symlink it
-                if self.symlink_tool(tool, auto_yes=self.auto_yes):
-                    self.out.info(f"tool '{tool}' linked and ready")
-                    available.add(tool)  # update for subsequent checks
-                else:
-                    self.out.fatal(f"cannot proceed without '{tool}'")
-                    return False
-            else:
+            resolved = self._resolve_tool(tool, step.get('action', ''))
+            if resolved is None:
                 self.out.fatal(f"tool '{tool}' not found on system — install it or check the name")
                 return False
+
+            if resolved != tool:
+                # LLM suggested an alternative — rewrite the step
+                self.out.info(f"using '{resolved}' instead of '{tool}'")
+                step["tool"] = resolved
+            else:
+                self.out.info(f"tool '{tool}' available")
         return True
 
     # ------------------------------------------------------------------

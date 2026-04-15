@@ -104,21 +104,97 @@ STATIC_COMMAND_WORDS = {
 }
 
 
-# Output markers for visual hierarchy
-MARKER_TASK   = "▸▸▸"       # task header
-MARKER_STEP   = "▹"         # sub-step / phase header
-MARKER_CMD    = "  ➜"       # command about to run
-MARKER_OUTPUT = "  │"       # output line
-MARKER_OK     = "  ✓"       # success / approved
-MARKER_FAIL   = "  ✗"       # failure
-MARKER_INFO   = "  ·"       # informational note
-MARKER_PROMPT = "  ?"       # user prompt
-MARKER_RULE   = "─" * 60
+# ------------------------------------------------------------------
+# Output primitives — semantic abstractions for CLI display
+# ------------------------------------------------------------------
 
+class Output:
+    """Semantic output layer for CLI display.
 
-def _prefix_lines(text: str, prefix: str) -> str:
-    """Prefix every line of *text* with *prefix*."""
-    return "\n".join(f"{prefix} {line}" for line in text.splitlines())
+    Instead of scattering marker constants and raw print() calls everywhere,
+    code expresses intent through semantic primitives like headline(),
+    section(), success(), fatal(), etc.  This centralises styling,
+    ensures visual consistency, and makes it trivial to retarget output
+    (e.g. JSON, logfmt, no-color mode) later.
+    """
+
+    # ANSI escape codes
+    _BOLD   = "\033[1m"
+    _DIM    = "\033[2m"
+    _RESET  = "\033[0m"
+    _GREEN  = "\033[32m"
+    _RED    = "\033[31m"
+    _YELLOW = "\033[33m"
+    _CYAN   = "\033[36m"
+    _BLUE   = "\033[34m"
+
+    def __init__(self, no_color: bool = False):
+        self._no_color = no_color or not sys.stdout.isatty()
+
+    def _c(self, code: str, text: str) -> str:
+        """Wrap *text* in ANSI *code* unless colour is disabled."""
+        if self._no_color:
+            return text
+        return f"{code}{text}{self._RESET}"
+
+    # ---- semantic primitives ----
+
+    def headline(self, text: str) -> None:
+        """Top-level task title — the main thing happening."""
+        marker = self._c(self._BOLD, "▸▸▸")
+        print(f"{marker} {self._c(self._BOLD, text)}")
+
+    def section(self, text: str) -> None:
+        """Sub-step / phase header — groups related output."""
+        marker = self._c(self._CYAN, "▹")
+        print(f"\n{marker} {self._c(self._BOLD, text)}")
+
+    def success(self, text: str) -> None:
+        """Positive outcome: approved, completed, confirmed."""
+        marker = self._c(self._GREEN, "✓")
+        print(f"  {marker} {text}")
+
+    def warning(self, text: str) -> None:
+        """Non-critical issue: degraded path, fallback, something to note."""
+        marker = self._c(self._YELLOW, "⚠")
+        print(f"  {marker} {self._c(self._YELLOW, text)}")
+
+    def fatal(self, text: str) -> None:
+        """Critical failure: cannot proceed."""
+        marker = self._c(self._RED, "✗")
+        print(f"\n  {marker} {self._c(self._RED, text)}")
+
+    def info(self, text: str) -> None:
+        """Neutral informational note."""
+        marker = self._c(self._DIM, "·")
+        print(f"  {marker} {self._c(self._DIM, text)}")
+
+    def command(self, text: str) -> None:
+        """A command about to be executed."""
+        marker = self._c(self._BLUE, "➜")
+        print(f"\n  {marker} {self._c(self._BOLD, text)}")
+
+    def output(self, text: str) -> None:
+        """Captured output line from a tool."""
+        print(f"  │ {self._c(self._DIM, text)}")
+
+    def prompt(self, text: str, end: str = "\n") -> None:
+        """User interaction prompt."""
+        marker = self._c(self._YELLOW, "?")
+        print(f"\n  {marker} {text}", end=end)
+
+    def separator(self) -> None:
+        """Horizontal rule separating major sections."""
+        line = "─" * 60
+        print(self._c(self._DIM, line))
+
+    # ---- compound helpers ----
+
+    def kv(self, key: str, value: str) -> None:
+        """Key-value pair in a detail view (left-aligned label + value)."""
+        label = self._c(self._DIM, f"{key}:")
+        print(f"  · {label:14s} {value}")
+
 
 
 class AgentCLI:
@@ -137,6 +213,8 @@ class AgentCLI:
             "model": None,
             "key": None,
         }
+
+        self.out = Output()
 
         self._load_config()
         self._setup_directories()
@@ -233,7 +311,7 @@ class AgentCLI:
             if candidate.exists() or candidate.is_symlink():
                 cmd_display = f"{tool} {' '.join(args)}" if args else tool
                 if show_cmd:
-                    print(f"\n{MARKER_CMD} {cmd_display}")
+                    self.out.command(cmd_display)
                 try:
                     r = subprocess.run(
                         [str(candidate)] + args,
@@ -288,7 +366,7 @@ class AgentCLI:
 
         path = self.find_tool_path(name)
         if not path:
-            print(f"\n{MARKER_FAIL} '{name}' not found on PATH — may need to be installed")
+            self.out.fatal(f"'{name}' not found on PATH — may need to be installed")
             return False
 
         if task is None:
@@ -299,12 +377,12 @@ class AgentCLI:
         link = task_bin / name
 
         if auto_yes:
-            print(f"{MARKER_OK} symlink  {name} → {path}  [{task}]")
+            self.out.success(f"symlink  {name} → {path}  [{task}]")
         else:
-            print(f"\n{MARKER_PROMPT} Allow '{name}' ({path})?  category: [{task}]  (y/n): ", end="")
+            self.out.prompt(f"Allow '{name}' ({path})?  category: [{task}]  (y/n): ", end="")
             resp = sys.stdin.readline().strip().lower()
             if resp != "y":
-                print(f"{MARKER_INFO} skipped")
+                self.out.info("skipped")
                 return False
 
         link.symlink_to(path)
@@ -607,7 +685,7 @@ class AgentCLI:
                     skill_file = f
                     break
             else:
-                print(f"{MARKER_FAIL} skill '{skill_name}' not found")
+                self.out.fatal(f"skill '{skill_name}' not found")
                 return False
 
         try:
@@ -616,10 +694,10 @@ class AgentCLI:
             data["invalidated"] = True
             with open(skill_file, "w") as fh:
                 json.dump(data, fh, indent=2)
-            print(f"{MARKER_OK} skill '{skill_name}' invalidated")
+            self.out.success(f"skill '{skill_name}' invalidated")
             return True
         except (json.JSONDecodeError, IOError) as e:
-            print(f"{MARKER_FAIL} error invalidating skill: {e}")
+            self.out.fatal(f"error invalidating skill: {e}")
             return False
 
     def delete_skill(self, skill_name: str) -> bool:
@@ -631,11 +709,11 @@ class AgentCLI:
                     skill_file = f
                     break
             else:
-                print(f"{MARKER_FAIL} skill '{skill_name}' not found")
+                self.out.fatal(f"skill '{skill_name}' not found")
                 return False
 
         skill_file.unlink()
-        print(f"{MARKER_OK} skill '{skill_name}' deleted")
+        self.out.success(f"skill '{skill_name}' deleted")
         return True
 
     def apply_skill(self, skill_meta: dict) -> bool:
@@ -650,12 +728,12 @@ class AgentCLI:
         # Load full skill data from file
         full = self._load_skill(skill_meta["name"])
         if not full:
-            print(f"{MARKER_INFO} skill file not found for '{skill_meta['name']}'")
+            self.out.info(f"skill file not found for '{skill_meta['name']}'")
             return False
 
         plan = full.get("plan", [])
         if not plan:
-            print(f"{MARKER_INFO} skill has no saved plan")
+            self.out.info("skill has no saved plan")
             return False
 
         # Get extracted parameters (set by _find_applicable_skill)
@@ -680,15 +758,15 @@ class AgentCLI:
             for arg in step.get("args", []):
                 unresolved.extend(re.findall(r'\{\{(\w+)\}\}', arg))
         if unresolved:
-            print(f"{MARKER_FAIL} unresolved parameters: {', '.join(set(unresolved))}")
+            self.out.fatal(f"unresolved parameters: {', '.join(set(unresolved))}")
             return False
 
-        print(f"{MARKER_OK} executing skill: {full.get('name', skill_meta['name'])}")
+        self.out.success(f"executing skill: {full.get('name', skill_meta['name'])}")
         if extracted_params:
             param_str = ", ".join(f"{k}={v}" for k, v in extracted_params.items())
-            print(f"{MARKER_INFO} params: {param_str}")
+            self.out.info(f"params: {param_str}")
         if full.get("tools_used"):
-            print(f"{MARKER_INFO} tools: {', '.join(full['tools_used'])}")
+            self.out.info(f"tools: {', '.join(full['tools_used'])}")
 
         # Validate each step
         for i, step in enumerate(resolved_plan):
@@ -696,15 +774,15 @@ class AgentCLI:
             if tool and tool not in self.all_tool_names():
                 if self.discover_tool(tool):
                     if not self.symlink_tool(tool, auto_yes=self.auto_yes):
-                        print(f"\n{MARKER_FAIL} cannot proceed without '{tool}'")
+                        self.out.fatal(f"cannot proceed without '{tool}'")
                         return False
                 else:
-                    print(f"\n{MARKER_FAIL} tool '{tool}' not available on this system")
+                    self.out.fatal(f"tool '{tool}' not available on this system")
                     return False
 
         # Execute
         for i, step in enumerate(resolved_plan):
-            print(f"\n{MARKER_STEP} skill step {i + 1}: {step['action']}")
+            self.out.section(f"skill step {i + 1}: {step['action']}")
             tool = step.get("tool")
             args = step.get("args", [])
 
@@ -712,12 +790,12 @@ class AgentCLI:
                 rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
                 if out.strip():
                     for line in out.strip().splitlines():
-                        print(f"{MARKER_OUTPUT} {line}")
+                        self.out.output(line)
                 if err.strip():
                     for line in err.strip().splitlines():
-                        print(f"{MARKER_OUTPUT} {line}")
+                        self.out.output(line)
             else:
-                print(f"{MARKER_INFO} no tool for this step")
+                self.out.info("no tool for this step")
 
         return True
 
@@ -802,14 +880,28 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # LLM inference
     # ------------------------------------------------------------------
+    def _resolve_base_url(self) -> str:
+        """Return a base URL that includes the /v1 (or /vN) API version prefix.
+
+        Most OpenAI-compatible providers expect paths like /v1/chat/completions.
+        If the user's base_url already ends with a version segment (e.g. /v1,
+        /v2, /v1beta), it's kept as-is.  Otherwise /v1 is appended automatically.
+        """
+        base_url = self.model_config.get("base_url") or "https://api.openai.com/v1"
+        base_url = base_url.rstrip('/')
+        # Already has a versioned path segment like /v1, /v2, /v1beta, etc.
+        if re.search(r'/v\d+(?:[a-z]*)?$', base_url):
+            return base_url
+        return f"{base_url}/v1"
+
     def list_models(self):
         """Query the /models endpoint and display available models."""
         if not self.model_config.get("key"):
-            print(f"{MARKER_FAIL} no API key configured — run: agent-cli --set key <your-key>")
+            self.out.fatal("no API key configured — run: agent-cli --set key <your-key>")
             return
 
-        base_url = self.model_config.get("base_url") or "https://api.openai.com/v1"
-        url = f"{base_url.rstrip('/')}/models"
+        base_url = self._resolve_base_url()
+        url = f"{base_url}/models"
 
         import urllib.error
         import urllib.request
@@ -823,36 +915,33 @@ class AgentCLI:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            print(f"{MARKER_FAIL} HTTP {e.code}: {e.reason}  ({url})")
+            self.out.fatal(f"HTTP {e.code}: {e.reason}  ({url})")
             return
         except Exception as e:
-            print(f"{MARKER_FAIL} request failed: {e}")
+            self.out.fatal(f"request failed: {e}")
             return
 
         models = result.get("data", [])
         if not models:
-            print(f"{MARKER_INFO} no models returned from {url}")
+            self.out.info(f"no models returned from {url}")
             return
 
-        print(f"{MARKER_OK} models available at {base_url.rstrip('/')}:")
+        self.out.success(f"models available at {base_url}:")
         for m in sorted(models, key=lambda x: x.get("id", "")):
             mid = m.get("id", "?")
             owner = m.get("owned_by", "")
-            line = f"  {MARKER_INFO} {mid}"
+            line = mid
             if owner:
                 line += f"  ({owner})"
-            print(line)
+            self.out.info(line)
 
     def _call_model(self, messages: list[dict]) -> Optional[str]:
         """Call the configured model via OpenAI-compatible API. Returns response text or None."""
         if not self.model_config.get("model") or not self.model_config.get("key"):
             return None
 
-        base_url = self.model_config.get("base_url")
-        if not base_url:
-            base_url = "https://api.openai.com/v1"
-
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        base_url = self._resolve_base_url()
+        url = f"{base_url}/chat/completions"
         import urllib.request
 
         payload = {
@@ -874,7 +963,7 @@ class AgentCLI:
                 result = json.loads(resp.read())
                 return result["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"{MARKER_FAIL} model call failed: {e}")
+            self.out.fatal(f"model call failed: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -932,13 +1021,13 @@ class AgentCLI:
                     for step in plan:
                         if not isinstance(step, dict) or "action" not in step:
                             raise ValueError("bad step")
-                    print(f"{MARKER_OK} plan generated by model")
+                    self.out.success("plan generated by model")
                     return plan
             except (json.JSONDecodeError, ValueError, KeyError):
-                print(f"{MARKER_INFO} model response unparsable — falling back to heuristics")
+                self.out.warning("model response unparsable — falling back to heuristics")
 
         # --- heuristic fallback ---
-        print(f"{MARKER_INFO} using heuristic plan (no model configured)")
+        self.out.warning("using heuristic plan (no model configured)")
         return self._heuristic_plan(task)
 
     def _heuristic_plan(self, task: str) -> list[dict]:
@@ -1017,23 +1106,24 @@ class AgentCLI:
             if not tool:
                 continue  # write_program path — always valid
 
-            print(f"\n{MARKER_STEP} validate  step {i + 1}: {step['action']}")
+            self.out.section(f"validate  step {i + 1}: {step['action']}")
 
             if tool in self.all_tool_names():
-                print(f"{MARKER_OK} tool '{tool}' already available")
+                self.out.success(f"tool '{tool}' already available")
             else:
                 # Tool not symlinked — try to discover it
                 if self.discover_tool(tool):
                     if self.symlink_tool(tool, auto_yes=self.auto_yes):
-                        print(f"{MARKER_OK} tool '{tool}' linked and ready")
+                        self.out.success(f"tool '{tool}' linked and ready")
                     else:
-                        print(f"\n{MARKER_FAIL} cannot proceed without '{tool}'")
+                        self.out.fatal(f"cannot proceed without '{tool}'")
                         return False
                 else:
-                    print(f"\n{MARKER_FAIL} '{tool}' not found on this system")
-                    resp = input(f"\n{MARKER_PROMPT} Install '{tool}' and retry? (y/n): ").strip().lower()
+                    self.out.fatal(f"'{tool}' not found on this system")
+                    self.out.prompt(f"Install '{tool}' and retry? (y/n): ", end="")
+                    resp = sys.stdin.readline().strip().lower()
                     if resp == "y":
-                        print(f"{MARKER_INFO} please install '{tool}' then re-run the task")
+                        self.out.info(f"please install '{tool}' then re-run the task")
                     return False
         return True
 
@@ -1071,7 +1161,7 @@ if __name__ == "__main__":
 
     def _execute_plan(self, plan: list[dict], task: str) -> bool:
         for i, step in enumerate(plan):
-            print(f"\n{MARKER_STEP} execute  step {i + 1}: {step['action']}")
+            self.out.section(f"execute  step {i + 1}: {step['action']}")
             tool = step.get("tool")
             args = step.get("args", [])
 
@@ -1079,20 +1169,20 @@ if __name__ == "__main__":
                 rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
                 if out.strip():
                     for line in out.strip().splitlines():
-                        print(f"{MARKER_OUTPUT} {line}")
+                        self.out.output(line)
                 if err.strip():
                     for line in err.strip().splitlines():
-                        print(f"{MARKER_OUTPUT} {line}")
+                        self.out.output(line)
             elif step.get("write_program"):
                 script = self._write_custom_program(task)
                 if script:
-                    print(f"{MARKER_OK} custom program written to {script}")
-                    print(f"{MARKER_INFO} review and run manually")
+                    self.out.success(f"custom program written to {script}")
+                    self.out.info("review and run manually")
                 else:
-                    print(f"\n{MARKER_FAIL} failed to write custom program")
+                    self.out.fatal("failed to write custom program")
                     return False
             else:
-                print(f"{MARKER_INFO} no specific tool — executing task directly")
+                self.out.info("no specific tool — executing task directly")
 
         return True
 
@@ -1100,92 +1190,159 @@ if __name__ == "__main__":
     # Main entry point
     # ------------------------------------------------------------------
     def execute_task(self, task: str):
-        print(f"{MARKER_TASK} {task}")
-        print(MARKER_RULE)
+        self.out.headline(task)
+        self.out.separator()
 
         # 1. Define success condition
-        print(f"\n{MARKER_STEP} success condition")
+        self.out.section("success condition")
         success = self._define_success_condition(task)
-        print(f"{MARKER_INFO} {success['description']}")
+        self.out.info(success['description'])
 
         # 2. Check for applicable skills
-        print(f"\n{MARKER_STEP} skills")
+        self.out.section("skills")
         skill = self._find_applicable_skill(task)
         if skill:
-            print(f"{MARKER_OK} match: {skill['name']}  ({skill.get('success_count', 0)}× success)")
+            self.out.success(f"match: {skill['name']}  ({skill.get('success_count', 0)}× success)")
 
             # 3. Apply skill
-            print(f"\n{MARKER_STEP} applying skill")
+            self.out.section("applying skill")
             if self.apply_skill(skill):
                 if self._check_success(success):
-                    print(f"\n{MARKER_RULE}")
-                    print(f"{MARKER_OK} SUCCESS  {success['description']}")
+                    self.out.separator()
+                    self.out.success(f"SUCCESS  {success['description']}")
                     return
-            print(f"\n{MARKER_INFO} skill did not satisfy — falling back to plan")
+            self.out.warning("skill did not satisfy — falling back to plan")
         else:
-            print(f"{MARKER_INFO} none found")
+            self.out.info("none found")
 
         # 4. Create plan
-        print(f"\n{MARKER_STEP} plan")
+        self.out.section("plan")
         plan = self._create_plan(task)
         tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
         for i, step in enumerate(plan):
             tool = step.get("tool", "custom")
-            print(f"{MARKER_INFO} step {i + 1}: {step['action']}  ({tool})")
+            self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
 
         # 5. Validate plan
-        print(f"\n{MARKER_STEP} validate")
+        self.out.section("validate")
         if not self._validate_plan(plan):
-            print(f"\n{MARKER_FAIL} validation failed")
+            self.out.fatal("validation failed")
             sys.exit(1)
-        print(f"{MARKER_OK} all steps valid")
+        self.out.success("all steps valid")
 
         # 6. Execute
-        print(f"\n{MARKER_STEP} execute")
+        self.out.section("execute")
         self._execute_plan(plan, task)
 
         # Verify & save skill
-        print(f"\n{MARKER_RULE}")
+        self.out.separator()
         if self._check_success(success):
             skill_path = self._save_skill(task, plan, success, tools_in_plan, success=True)
-            print(f"{MARKER_OK} SUCCESS  {success['description']}")
+            self.out.success(f"SUCCESS  {success['description']}")
             if skill_path:
-                print(f"{MARKER_OK} skill saved → {Path(skill_path).name}")
+                self.out.success(f"skill saved → {Path(skill_path).name}")
         else:
             self._save_skill(task, plan, success, tools_in_plan, success=False)
-            print(f"{MARKER_FAIL} FAILED  {success['description']}")
+            self.out.fatal(f"FAILED  {success['description']}")
             sys.exit(1)
 
     def show_status(self):
-        print(f"{MARKER_TASK} agent-cli")
-        print(MARKER_RULE)
+        self.out.headline("agent-cli")
+        self.out.separator()
 
         tools = self.get_all_symlinked_tools()
-        print(f"\n{MARKER_STEP} tools")
+        self.out.section("tools")
         for task, names in sorted(tools.items()):
-            print(f"{MARKER_INFO} {task}/bin/  {' '.join(names)}")
+            self.out.info(f"{task}/bin/  {' '.join(names)}")
 
         self._print_skills()
 
-        print(f"\n{MARKER_RULE}")
-        print(f"{MARKER_INFO} agent-cli '<task>'")
-        print(f"{MARKER_INFO} agent-cli --skills")
-        print(f"{MARKER_INFO} agent-cli --invalidate <skill>")
-        print(f"{MARKER_INFO} agent-cli --set model 'model-name'")
+        self.out.separator()
+        self.out.info("agent-cli '<task>'")
+        self.out.info("agent-cli --skills [name]")
+        self.out.info("agent-cli --invalidate <skill>")
+        self.out.info("agent-cli --set model 'model-name'")
 
     def _print_skills(self):
         """Print a formatted list of skills."""
         skills = self.get_available_skills()
-        print(f"\n{MARKER_STEP} skills")
+        self.out.section("skills")
         if not skills:
-            print(f"{MARKER_INFO} none yet — they are saved automatically on success")
+            self.out.info("none yet — they are saved automatically on success")
             return
         for s in skills:
             status = "invalidated" if s.get("invalidated") else f"{s['success_count']}×"
             tools_str = f" [{', '.join(s['tools_used'])}]" if s.get("tools_used") else ""
-            print(f"{MARKER_INFO} {s['name']:30s}  {status:12s}{tools_str}")
+            self.out.info(f"{s['name']:30s}  {status:12s}{tools_str}")
             if s.get("description"):
-                print(f"         {s['description']}")
+                self.out.info(s['description'])
+
+    def _print_skill_detail(self, skill_name: str):
+        """Print detailed information about a single skill."""
+        data = self._load_skill(skill_name)
+        if not data:
+            self.out.fatal(f"skill '{skill_name}' not found")
+            return
+
+        self.out.headline(data.get('name', skill_name))
+        self.out.separator()
+
+        # Find the file path for this skill
+        for f in self.skills_dir.iterdir():
+            if f.is_file() and f.suffix == ".json" and (f.stem == skill_name or f.name == skill_name):
+                self.out.kv("file", str(f))
+                break
+
+        # Overview
+        desc = data.get("description", "")
+        if desc:
+            self.out.kv("description", desc)
+        status = "invalidated" if data.get("invalidated") else "active"
+        self.out.kv("status", status)
+        self.out.kv("success_count", f"{data.get('success_count', 0)}×")
+        tools = data.get("tools_used", [])
+        if tools:
+            self.out.kv("tools", ', '.join(tools))
+
+        # Pattern / regex
+        regex = data.get("task_regex", "")
+        pattern = data.get("task_pattern", "")
+        self.out.section("matching")
+        if regex:
+            self.out.kv("task_regex", regex)
+        if pattern:
+            self.out.kv("task_pattern", pattern)
+
+        # Parameters
+        params = data.get("params_map", {})
+        if params:
+            self.out.section("parameters")
+            for orig, pname in params.items():
+                self.out.kv(pname, orig)
+
+        # Plan
+        plan = data.get("plan", [])
+        if plan:
+            self.out.section("plan")
+            for i, step in enumerate(plan):
+                tool = step.get("tool", "custom")
+                args = step.get("args", [])
+                args_str = ' '.join(args) if args else ''
+                self.out.info(f"step {i + 1}: {step.get('action', '?')}  ({tool})  {args_str}")
+
+        # Success condition
+        condition = data.get("success_condition", {})
+        if condition:
+            self.out.section("success condition")
+            cond_desc = condition.get("description", "")
+            if cond_desc:
+                self.out.info(cond_desc)
+            ctype = condition.get("type", "")
+            if ctype:
+                self.out.kv("type", ctype)
+            for key in ("expect_dirs", "expect_dir"):
+                if key in condition:
+                    self.out.kv(key, str(condition[key]))
 
 
 def main():
@@ -1210,8 +1367,8 @@ def main():
         help="Auto-approve tool symlinks (non-interactive mode)",
     )
     parser.add_argument(
-        "--skills", action="store_true",
-        help="List available skills",
+        "--skills", nargs="?", const="__all__", metavar="SKILL",
+        help="List skills, or show detail for a specific skill",
     )
     parser.add_argument(
         "--invalidate", metavar="SKILL",
@@ -1245,7 +1402,10 @@ def main():
     if args.task:
         agent.execute_task(args.task)
     elif args.skills:
-        agent._print_skills()
+        if args.skills == "__all__":
+            agent._print_skills()
+        else:
+            agent._print_skill_detail(args.skills)
     elif args.invalidate:
         agent.invalidate_skill(args.invalidate)
     elif args.delete:

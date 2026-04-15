@@ -1078,7 +1078,7 @@ class AgentCLI:
                 self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
                 return False, ""
 
-        return True, "\n".join(captured)
+        return True, "\n---\n".join(captured)
 
     # ------------------------------------------------------------------
     # Success condition
@@ -1089,8 +1089,24 @@ class AgentCLI:
             self.out.fatal("no output produced — cannot verify success")
             return False
 
-        # Truncate output to avoid excessive token usage
-        output_for_llm = captured_output[:4000]
+        # Truncate output to avoid excessive token usage.
+        # When there are multiple steps, cap each step's contribution so
+        # all steps are represented in the verification prompt.
+        MAX_VERIFY_CHARS = 8000
+        PER_STEP_CAP = 3000
+        if len(captured_output) <= MAX_VERIFY_CHARS:
+            output_for_llm = captured_output
+        else:
+            # Split by step boundaries ("---" separators between step outputs)
+            # and cap each chunk so all steps are represented
+            chunks = captured_output.split("\n---\n")
+            trimmed = []
+            for chunk in chunks:
+                if len(chunk) > PER_STEP_CAP:
+                    trimmed.append(chunk[:PER_STEP_CAP] + "\n... (truncated)")
+                else:
+                    trimmed.append(chunk)
+            output_for_llm = "\n---\n".join(trimmed)[:MAX_VERIFY_CHARS]
 
         system_prompt = (
             "You are a verification assistant. Determine if the given task was "
@@ -1416,7 +1432,7 @@ class AgentCLI:
                 self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
                 return False, ""
 
-        return True, "\n".join(captured)
+        return True, "\n---\n".join(captured)
 
     # ------------------------------------------------------------------
     # Main entry point

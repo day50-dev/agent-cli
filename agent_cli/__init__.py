@@ -180,11 +180,11 @@ class Output:
 
     def section(self, text: str) -> None:
         """Sub-step / phase header — groups related output."""
-        self._render(f"### {text}\n\n")
+        self._render(f"\n### {text}\n")
 
     def success(self, text: str) -> None:
         """Positive outcome: approved, completed, confirmed."""
-        self._render(f"✓ {text}\n\n")
+        self._render(f"✓ {text}\n")
 
     def warning(self, text: str) -> None:
         """Non-critical issue: degraded path, fallback, something to note."""
@@ -192,19 +192,19 @@ class Output:
 
     def fatal(self, text: str) -> None:
         """Critical failure: cannot proceed."""
-        self._render(f"✗ **{text}**\n\n")
+        self._render(f"✗ **{text}**\n")
 
     def info(self, text: str) -> None:
         """Neutral informational note."""
-        self._render(f"* {text}\n\n")
+        self._render(f"* {text}\n")
 
     def command(self, text: str) -> None:
         """A command about to be executed."""
-        self._render(f"➜ `{_md_escape(text)}`\n\n")
+        self._render(f"- {_md_escape(text)}\n")
 
     def output(self, text: str) -> None:
         """Captured output line from a tool."""
-        self._render(f"> {_md_escape(text)}\n\n")
+        self._render(f"> {_md_escape(text)}\n")
 
     def prompt(self, text: str, end: str = "\n") -> None:
         """User interaction prompt."""
@@ -219,7 +219,7 @@ class Output:
 
     def kv(self, key: str, value: str) -> None:
         """Key-value pair in a detail view (left-aligned label + value)."""
-        self._render(f"**{key}:** `{_md_escape(value)}`\n\n")
+        self._render(f"* {key}: `{_md_escape(value)}`\n")
 
     # ---- markdown rendering (streamdown) ----
 
@@ -1718,7 +1718,7 @@ if __name__ == "__main__":
             md += "### success condition\n\n"
             cond_desc = condition.get("description", "")
             if cond_desc:
-                md += f"> {cond_desc}\n\n"
+                md += f"> {cond_desc}\n"
             ctype = condition.get("type", "")
             if ctype:
                 md += f"**type:** `{_md_escape(ctype)}`\n\n"

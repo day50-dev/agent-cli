@@ -619,7 +619,6 @@ class AgentCLI:
                 "name": name,
                 "dir": str(d),
                 "description": (skill_md_meta or {}).get("description", ""),
-                "task_pattern": plan_data.get("task_pattern", ""),
                 "task_regex": plan_data.get("task_regex", ""),
                 "params_map": plan_data.get("params_map", {}),
                 "success_count": plan_data.get("success_count", 1),
@@ -835,44 +834,19 @@ class AgentCLI:
 
         return "".join(parts)
 
-    def _parameterize_success_condition(self, condition: dict, params_map: dict[str, str]) -> dict:
-        """Replace concrete values in the success condition with {{param}} placeholders.
+    def _parameterize_success_condition(self, condition: str, params_map: dict[str, str]) -> str:
+        """Replace concrete values in the success condition string with {{param}} placeholders.
 
         Only replaces values that appear in params_map (i.e., were also
         parameterized in the plan), so the condition stays consistent
         with the parameterized plan at apply-time.
         """
-        param_condition = {}
-        for key, value in condition.items():
-            if isinstance(value, str):
-                # Replace any known parameter value with its placeholder
-                new_val = value
-                for orig, param_name in params_map.items():
-                    new_val = new_val.replace(orig, f"{{{{{param_name}}}}}")
-                param_condition[key] = new_val
-            elif isinstance(value, list):
-                param_condition[key] = [
-                    self._parameterize_success_condition_value(item, params_map)
-                    for item in value
-                ]
-            else:
-                param_condition[key] = value
-        return param_condition
+        result = condition
+        for orig, param_name in params_map.items():
+            result = result.replace(orig, f"{{{{{param_name}}}}}")
+        return result
 
-    def _parameterize_success_condition_value(self, value, params_map: dict[str, str]):
-        """Replace parameter values inside a single success-condition value."""
-        if isinstance(value, str):
-            new_val = value
-            for orig, param_name in params_map.items():
-                new_val = new_val.replace(orig, f"{{{{{param_name}}}}}")
-            return new_val
-        if isinstance(value, list):
-            return [self._parameterize_success_condition_value(v, params_map) for v in value]
-        if isinstance(value, dict):
-            return self._parameterize_success_condition(value, params_map)
-        return value
-
-    def _save_skill(self, task: str, plan: list[dict], success_condition: dict,
+    def _save_skill(self, task: str, plan: list[dict], success_condition: str,
                     tools_used: list[str], success: bool = True) -> Optional[str]:
         """Persist the completed task as a reusable, parameterized skill.
 
@@ -1014,30 +988,30 @@ class AgentCLI:
         self.out.success(f"skill '{skill_name}' deleted")
         return True
 
-    def apply_skill(self, skill_meta: dict) -> bool:
+    def apply_skill(self, skill_meta: dict) -> tuple[bool, str]:
         """Execute a saved skill's plan with parameter substitution.
 
         Extracts parameter values from the current task (stored in
         skill_meta["_extracted_params"] by _find_applicable_skill), substitutes
         them into the parameterized plan, then executes.
 
-        Returns True if all steps succeeded.
+        Returns (success, captured_output).
         """
         # Load full skill data from file
         full = self._load_skill(skill_meta["name"])
         if not full:
             self.out.info(f"skill file not found for '{skill_meta['name']}'")
-            return False
+            return False, ""
 
         plan = full.get("plan", [])
         if not plan:
             self.out.info("skill has no saved plan")
-            return False
+            return False, ""
 
         # Reject skills where no step actually does anything
         if not any(step.get("tool") for step in plan):
             self.out.warning(f"skill '{skill_meta['name']}' has no executable steps — skipping")
-            return False
+            return False, ""
 
         # Get extracted parameters (set by _find_applicable_skill)
         extracted_params = skill_meta.get("_extracted_params", {})
@@ -1062,7 +1036,7 @@ class AgentCLI:
                 unresolved.extend(re.findall(r'\{\{(\w+)\}\}', arg))
         if unresolved:
             self.out.fatal(f"unresolved parameters: {', '.join(set(unresolved))}")
-            return False
+            return False, ""
 
         self.out.success(f"executing skill: {full.get('name', skill_meta['name'])}")
         if extracted_params:
@@ -1078,12 +1052,13 @@ class AgentCLI:
                 if self.discover_tool(tool):
                     if not self.symlink_tool(tool, auto_yes=self.auto_yes):
                         self.out.fatal(f"cannot proceed without '{tool}'")
-                        return False
+                        return False, ""
                 else:
                     self.out.fatal(f"tool '{tool}' not available on this system")
-                    return False
+                    return False, ""
 
-        # Execute
+        # Execute — capture output for verification
+        captured = []
         for i, step in enumerate(resolved_plan):
             self.out.subsection(f"skill step {i + 1}: {step['action']}")
             tool = step.get("tool")
@@ -1094,92 +1069,71 @@ class AgentCLI:
                 if out.strip():
                     for line in out.strip().splitlines():
                         self.out.output(line)
+                    captured.append(out.strip())
                 if err.strip():
                     for line in err.strip().splitlines():
                         self.out.output(line)
+                    captured.append(err.strip())
             else:
                 self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
-                return False
+                return False, ""
 
-        return True
+        return True, "\n".join(captured)
 
     # ------------------------------------------------------------------
     # Success condition
     # ------------------------------------------------------------------
-    def _define_success_condition(self, task: str) -> dict:
-        """
-        Look at the current directory context and produce a concrete,
-        checkable success condition for the given task.
-        """
-        cwd = Path.cwd()
-        files = [f.name for f in cwd.iterdir() if f.is_file()]
-        dirs = [d.name for d in cwd.iterdir() if d.is_dir()]
+    def _verify_success(self, task: str, success_condition: str, captured_output: str) -> bool:
+        """Ask the LLM to verify whether the tool output satisfies the success condition."""
+        if not captured_output.strip():
+            self.out.fatal("no output produced — cannot verify success")
+            return False
 
-        condition = {
-            "cwd": str(cwd),
-            "files_before": files,
-            "dirs_before": dirs,
-            "description": "",
-        }
+        # Truncate output to avoid excessive token usage
+        output_for_llm = captured_output[:4000]
 
-        tl = task.lower()
+        system_prompt = (
+            "You are a verification assistant. Determine if the given task was "
+            "successfully completed based strictly on the provided success condition "
+            "and tool output. Respond ONLY with valid JSON."
+        )
+        user_prompt = (
+            f"Task: {task}\n"
+            f"Success condition: {success_condition}\n\n"
+            "Tool output:\n"
+            f"```\n{output_for_llm}\n```\n\n"
+            'Respond in this JSON format:\n'
+            '{"satisfied": true/false, "reason": "brief explanation"}'
+        )
 
-        # Clone / repository tasks — handle multiple repos
-        if any(kw in tl for kw in ("clone", "repo", "repository", "git clone")):
-            expected_dirs = []
-            # Find "as <name>" patterns
-            as_matches = re.findall(r'\bas\s+(\S+)', tl)
-            for am in as_matches:
-                expected_dirs.append(am.replace(".git", ""))
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
 
-            # Only use "as" names if present; otherwise fall back to repo names
-            if not expected_dirs:
-                repo_matches = re.findall(r'github\.com/[\w.-]+/([\w.-]+)', tl)
-                for rm in repo_matches:
-                    expected_dirs.append(rm.replace(".git", ""))
+        if result is None:
+            self.out.warning("verification call failed — assuming success")
+            return True
 
-            if expected_dirs:
-                dir_list = "', '".join(expected_dirs)
-                condition["description"] = f"Directories '{dir_list}' exist in {cwd}"
-                condition["expect_dirs"] = expected_dirs
-                condition["type"] = "dirs_exist"
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r'^```(?:json)?\n?', '', result)
+            result = re.sub(r'\n?```$', '', result)
+            result = result.strip()
+
+        try:
+            parsed = json.loads(result)
+            satisfied = parsed.get("satisfied", False)
+            reason = parsed.get("reason", "")
+            if satisfied:
+                self.out.success(f"verified: {reason}")
+                return True
             else:
-                condition["description"] = f"Repository directory exists in {cwd}"
-                condition["type"] = "dir_exists"
-
-        # File creation / write tasks
-        elif any(kw in tl for kw in ("create", "write", "generate", "new file")):
-            condition["description"] = f"New file(s) created in {cwd}"
-            condition["type"] = "new_file"
-
-        # Generic
-        else:
-            condition["description"] = f"Task '{task}' completed successfully"
-            condition["type"] = "generic"
-
-        return condition
-
-    def _check_success(self, condition: dict) -> bool:
-        cwd = Path.cwd()
-        now_files = {f.name for f in cwd.iterdir() if f.is_file()}
-        now_dirs = {d.name for d in cwd.iterdir() if d.is_dir()}
-
-        ctype = condition.get("type", "generic")
-
-        if ctype == "dirs_exist":
-            targets = condition.get("expect_dirs", [])
-            return all((cwd / d).is_dir() for d in targets)
-
-        if ctype == "dir_exists":
-            target = condition.get("expect_dir", "")
-            return (cwd / target).is_dir()
-
-        if ctype == "new_file":
-            before = set(condition.get("files_before", []))
-            return len(now_files - before) > 0
-
-        # Generic: always return True (we trust execution)
-        return True
+                self.out.fatal(f"verification failed: {reason}")
+                return False
+        except (json.JSONDecodeError, ValueError):
+            self.out.warning("verification response unparseable — assuming success")
+            return True
 
     # ------------------------------------------------------------------
     # LLM inference
@@ -1328,11 +1282,12 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Plan creation & validation
     # ------------------------------------------------------------------
-    def _create_plan(self, task: str) -> list[dict]:
+    def _create_plan(self, task: str) -> tuple[list[dict], str]:
         """
-        Build a step-by-step plan using the LLM.
+        Build a step-by-step plan and success condition using the LLM.
 
-        Each step specifies a tool to run and arguments for it.
+        Returns (plan_steps, success_condition) where success_condition
+        is a specific, checkable description of what 'done' looks like.
         """
         tools = self.all_tool_names()
         cwd = Path.cwd()
@@ -1340,19 +1295,28 @@ class AgentCLI:
         system_prompt = (
             "You are a task planner for a command-line agent. "
             "Given a user task, available system tools, and directory context, "
-            "produce a JSON array of plan steps. Each step is an object with:\n"
-            '  - "action": a SHORT verb-only description of the step (e.g. "clone_repo", "read_file", "list_dir"). '
-            '    Do NOT include specific URLs, names, or values — those go in "args". '
-            '    The action is the function; the args are the parameters.\n'
+            "produce a JSON object with a plan and a success condition.\n\n"
+            "The plan is an array of steps, each with:\n"
+            '  - "action": a SHORT verb-only description (e.g. "read_cpu", "list_dir", "clone_repo")\n'
             '  - "tool": MUST be one of the available tools listed below. Do NOT invent tool names.\n'
-            '  - "args": list of string arguments for that tool (this is where specific values go)\n'
-            "Return ONLY valid JSON, no markdown, no explanation.\n"
+            '  - "args": list of string arguments for that tool\n\n'
+            'The success_condition is a string describing what the tool output must contain '
+            'for the task to be considered done. Be specific. '
+            'Bad: "task completed successfully". '
+            'Good: "output contains the CPU model name and total memory in MB".\n\n'
+            "Return ONLY valid JSON in this format:\n"
+            '{\n'
+            '  "plan": [{"action": "...", "tool": "...", "args": [...]}],\n'
+            '  "success_condition": "..."\n'
+            '}\n\n'
             "IMPORTANT: The 'tool' field MUST be exactly one of the available tools. "
             "Do NOT use the task description as a tool name. Do NOT invent new tool names. "
             "If no available tool can accomplish the task, use the closest one with appropriate args.\n"
             "For example, to read /proc/cpuinfo, use tool 'cat' with args ['/proc/cpuinfo']. "
             "To list directory contents, use tool 'ls' with args ['-la']. "
-            "To read the first lines of a file, use tool 'head' with args ['-n', '20', '/path/to/file']."
+            "To read the first lines of a file, use tool 'head' with args ['-n', '20', '/path/to/file'].\n\n"
+            "If a task changes system state (like creating a file), include a final step "
+            "to output the result (e.g. ls or cat) so it can be verified."
         )
 
         user_prompt = (
@@ -1380,20 +1344,28 @@ class AgentCLI:
             result = re.sub(r'\n?```$', '', result)
             result = result.strip()
         try:
-            plan = json.loads(result)
-            if isinstance(plan, list):
-                # Validate structure
-                for step in plan:
-                    if not isinstance(step, dict) or "action" not in step:
-                        raise ValueError("bad step")
-                self.out.success("plan generated by model")
-                return plan
+            parsed = json.loads(result)
+            # Accept either the new object format or legacy array format
+            if isinstance(parsed, list):
+                plan = parsed
+                success_condition = f"Task '{task}' completed successfully"
+            elif isinstance(parsed, dict):
+                plan = parsed.get("plan", [])
+                success_condition = parsed.get("success_condition", f"Task '{task}' completed successfully")
+            else:
+                raise ValueError("bad response type")
+
+            # Validate plan structure
+            if not isinstance(plan, list):
+                raise ValueError("plan is not an array")
+            for step in plan:
+                if not isinstance(step, dict) or "action" not in step:
+                    raise ValueError("bad step")
+            self.out.success("plan generated by model")
+            return plan, success_condition
         except (json.JSONDecodeError, ValueError, KeyError):
             self.out.fatal("model response was not valid JSON — cannot proceed")
             sys.exit(1)
-
-        self.out.fatal("no plan produced")
-        sys.exit(1)
 
 
     def _validate_plan(self, plan: list[dict]) -> bool:
@@ -1425,7 +1397,9 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
-    def _execute_plan(self, plan: list[dict], task: str) -> bool:
+    def _execute_plan(self, plan: list[dict], task: str) -> tuple[bool, str]:
+        """Execute each plan step, returning (success, captured_output)."""
+        captured = []
         for i, step in enumerate(plan):
             self.out.section(f"execute  step {i + 1}: {step['action']}")
             tool = step.get("tool")
@@ -1436,14 +1410,16 @@ class AgentCLI:
                 if out.strip():
                     for line in out.strip().splitlines():
                         self.out.output(line)
+                    captured.append(out.strip())
                 if err.strip():
                     for line in err.strip().splitlines():
                         self.out.output(line)
+                    captured.append(err.strip())
             else:
                 self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
-                return False
+                return False, ""
 
-        return True
+        return True, "\n".join(captured)
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -1452,57 +1428,75 @@ class AgentCLI:
         self.out.headline(task)
         self.out.separator()
 
-        # 1. Define success condition
-        self.out.section("Success Condition")
-        success = self._define_success_condition(task)
-        self.out.info(success['description'])
-
-        # 2. Check for applicable skills
+        # 1. Check for applicable skills
         self.out.section("Skills")
         skill = self._find_applicable_skill(task)
+        skill_success_condition = None
         if skill:
             self.out.success(f"match: {skill['name']}  ({skill.get('success_count', 0)}× success)")
 
-            # 3. Apply skill
+            # 2. Apply skill — capture output for verification
             self.out.section("applying skill")
-            if self.apply_skill(skill):
-                if self._check_success(success):
+            ok, captured = self.apply_skill(skill)
+            if ok:
+                # Load the skill's saved success condition for verification
+                full_skill = self._load_skill(skill['name'])
+                skill_success_condition = full_skill.get("success_condition", "")
+                # Backwards compat: old skills stored success_condition as a dict
+                if isinstance(skill_success_condition, dict):
+                    skill_success_condition = skill_success_condition.get("description", "")
+                # Substitute any parameter placeholders
+                extracted = skill.get("_extracted_params", {})
+                for pname, pval in extracted.items():
+                    skill_success_condition = skill_success_condition.replace(f"{{{{{pname}}}}}", pval)
+
+                if skill_success_condition:
+                    self.out.section("verify")
+                    if self._verify_success(task, skill_success_condition, captured):
+                        self.out.separator()
+                        self.out.success(f"SUCCESS  {skill_success_condition}")
+                        return
+                else:
+                    # No saved condition — can't verify, assume ok
                     self.out.separator()
-                    self.out.success(f"SUCCESS  {success['description']}")
+                    self.out.success(f"skill completed: {skill['name']}")
                     return
             self.out.warning("skill did not satisfy — falling back to plan")
         else:
             self.out.info("none found")
 
-        # 4. Create plan
+        # 3. Create plan + success condition via LLM
         self.out.section("plan")
-        plan = self._create_plan(task)
+        plan, success_condition = self._create_plan(task)
         tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
         for i, step in enumerate(plan):
-            tool = step.get("tool", "custom")
+            tool = step.get("tool", "(none)")
             self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
+        self.out.info(f"success condition: {success_condition}")
 
-        # 5. Validate plan
+        # 4. Validate plan
         self.out.section("validate")
         if not self._validate_plan(plan):
             self.out.fatal("validation failed")
             sys.exit(1)
         self.out.success("all steps valid")
 
-        # 6. Execute
+        # 5. Execute — capture output
         self.out.section("execute")
-        self._execute_plan(plan, task)
+        _, captured = self._execute_plan(plan, task)
 
-        # Verify & save skill
-        self.out.separator()
-        if self._check_success(success):
-            skill_path = self._save_skill(task, plan, success, tools_in_plan, success=True)
-            self.out.success(f"SUCCESS  {success['description']}")
+        # 6. Verify against success condition & save skill
+        self.out.section("verify")
+        if self._verify_success(task, success_condition, captured):
+            self.out.separator()
+            skill_path = self._save_skill(task, plan, success_condition, tools_in_plan, success=True)
+            self.out.success(f"SUCCESS  {success_condition}")
             if skill_path:
                 self.out.success(f"skill saved → {Path(skill_path).name}")
         else:
-            self._save_skill(task, plan, success, tools_in_plan, success=False)
-            self.out.fatal(f"FAILED  {success['description']}")
+            self._save_skill(task, plan, success_condition, tools_in_plan, success=False)
+            self.out.separator()
+            self.out.fatal(f"FAILED  {success_condition}")
             sys.exit(1)
 
     def show_status(self):

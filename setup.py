@@ -27,6 +27,7 @@ setup(
     entry_points={
         "console_scripts": [
             "agent-cli=agent_cli:main",
+            "ac=agent_cli:main",
         ],
     },
 )

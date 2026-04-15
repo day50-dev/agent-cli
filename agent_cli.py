@@ -25,6 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+import yaml
 
 
 # Default configuration — lives under site.USER_BASE (~/.local on Linux,
@@ -201,7 +202,7 @@ class AgentCLI:
     """Main agent-cli class."""
 
     def __init__(self, config_dir: Optional[Path] = None, auto_yes: bool = False):
-        self.config_dir = config_dir or DEFAULT_CONFIG_DIR
+        self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.auto_yes = auto_yes
         self.tools_dir = self.config_dir / "tools"
         self.skills_dir = self.config_dir / "skills"
@@ -389,33 +390,120 @@ class AgentCLI:
         return True
 
     # ------------------------------------------------------------------
-    # Skills
+    # Skills  (Anthropic SKILL.md directory format)
     # ------------------------------------------------------------------
+    #
+    # Each skill is stored as a directory:
+    #   skills/<skill-name>/
+    #     SKILL.md   — YAML frontmatter (name, description) + markdown
+    #                   body with instructions / context for LLM use
+    #     plan.json  — machine-readable execution data:
+    #                   plan, params_map, task_regex, success_condition,
+    #                   success_count, invalidated, tools_used
+    #
+    # This follows the Agent Skills standard (agentskills.io) and is
+    # compatible with Anthropic's Claude skill ecosystem.
+
+    def _migrate_legacy_skills(self):
+        """One-time migration: convert flat .json skill files to SKILL.md directories."""
+        if not self.skills_dir.exists():
+            return
+        for f in list(self.skills_dir.iterdir()):
+            if not (f.is_file() and f.suffix == ".json"):
+                continue
+            try:
+                with open(f) as fh:
+                    data = json.load(fh)
+            except (json.JSONDecodeError, IOError):
+                continue
+
+            skill_name = data.get("name", f.stem)
+            skill_dir = self.skills_dir / skill_name
+            if skill_dir.exists():
+                # Already migrated — remove orphaned JSON
+                f.unlink()
+                continue
+
+            skill_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write plan.json
+            plan_data = {k: data[k] for k in data
+                         if k not in ("name", "description")}
+            with open(skill_dir / "plan.json", "w") as fh:
+                json.dump(plan_data, fh, indent=2)
+
+            # Synthesize a SKILL.md
+            desc = data.get("description", f"Skill: {skill_name}")
+            tools = data.get("tools_used", [])
+            allowed = " ".join(tools) if tools else ""
+            frontmatter = {
+                "name": skill_name,
+                "description": desc,
+            }
+            if allowed:
+                frontmatter["allowed-tools"] = allowed
+
+            body = (
+                f"# {skill_name}\n\n"
+                f"{desc}\n\n"
+                f"## Parameters\n\n"
+                "This skill is parameterized.  Values are extracted from the\n"
+                "user's task string via `task_regex` and substituted into the\n"
+                "plan before execution.\n"
+            )
+            skill_md = f"---\n{yaml.dump(frontmatter, default_flow_style=False).strip()}\n---\n\n{body}"
+            with open(skill_dir / "SKILL.md", "w") as fh:
+                fh.write(skill_md)
+
+            # Remove the old JSON file
+            f.unlink()
+
+    def _parse_skill_md(self, skill_dir: Path) -> Optional[dict]:
+        """Read SKILL.md frontmatter and return the YAML metadata dict."""
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            return None
+        text = skill_md.read_text()
+        # Extract YAML frontmatter between --- delimiters
+        m = re.match(r'^---\s*\n(.*?)\n---', text, re.DOTALL)
+        if not m:
+            return None
+        try:
+            return yaml.safe_load(m.group(1))
+        except yaml.YAMLError:
+            return None
+
     def get_available_skills(self) -> list[dict]:
-        """Return list of skill metadata (name, file, description, success_count)."""
+        """Return list of skill metadata from SKILL.md directories."""
+        self._migrate_legacy_skills()
         skills = []
         if not self.skills_dir.exists():
             return skills
-        for f in sorted(self.skills_dir.iterdir()):
-            if f.is_file() and f.suffix == ".json":
+        for d in sorted(self.skills_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            skill_md_meta = self._parse_skill_md(d)
+            plan_file = d / "plan.json"
+            plan_data = {}
+            if plan_file.exists():
                 try:
-                    with open(f) as fh:
-                        data = json.load(fh)
-                    skills.append({
-                        "name": data.get("name", f.stem),
-                        "file": f.name,
-                        "file_path": str(f),
-                        "description": data.get("description", ""),
-                        "task_pattern": data.get("task_pattern", ""),
-                        "task_regex": data.get("task_regex", ""),
-                        "params_map": data.get("params_map", {}),
-                        "success_count": data.get("success_count", 1),
-                        "tools_used": data.get("tools_used", []),
-                        "invalidated": data.get("invalidated", False),
-                        "_data": data,  # Full data loaded from file
-                    })
+                    with open(plan_file) as fh:
+                        plan_data = json.load(fh)
                 except (json.JSONDecodeError, IOError):
                     pass
+
+            name = (skill_md_meta or {}).get("name", d.name)
+            skills.append({
+                "name": name,
+                "dir": str(d),
+                "description": (skill_md_meta or {}).get("description", ""),
+                "task_pattern": plan_data.get("task_pattern", ""),
+                "task_regex": plan_data.get("task_regex", ""),
+                "params_map": plan_data.get("params_map", {}),
+                "success_count": plan_data.get("success_count", 1),
+                "tools_used": plan_data.get("tools_used", []),
+                "invalidated": plan_data.get("invalidated", False),
+            })
         return skills
 
     def _find_applicable_skill(self, task: str) -> Optional[dict]:
@@ -446,22 +534,45 @@ class AgentCLI:
         return None
 
     def _load_skill(self, name: str) -> dict:
-        """Load a skill by name or filename. Tries both."""
-        for f in self.skills_dir.iterdir():
-            if f.stem == name or f.name == name:
-                if f.suffix == ".json":
-                    with open(f) as fh:
-                        return json.load(fh)
-        # Also try matching against the 'name' field inside each file
-        for f in self.skills_dir.iterdir():
-            if f.is_file() and f.suffix == ".json":
+        """Load a skill by name. Returns merged SKILL.md + plan.json data."""
+        self._migrate_legacy_skills()
+        # Try directory match by name
+        skill_dir = self.skills_dir / name
+        if skill_dir.is_dir():
+            skill_md_meta = self._parse_skill_md(skill_dir) or {}
+            plan_data = {}
+            plan_file = skill_dir / "plan.json"
+            if plan_file.exists():
                 try:
-                    with open(f) as fh:
-                        data = json.load(fh)
-                    if data.get("name") == name:
-                        return data
+                    with open(plan_file) as fh:
+                        plan_data = json.load(fh)
                 except (json.JSONDecodeError, IOError):
                     pass
+            # Merge: SKILL.md frontmatter provides name/description,
+            # plan.json provides everything else
+            result = {"name": skill_md_meta.get("name", name),
+                      "description": skill_md_meta.get("description", "")}
+            result.update(plan_data)
+            return result
+
+        # Try matching against the 'name' field inside each directory's SKILL.md
+        for d in self.skills_dir.iterdir():
+            if not d.is_dir():
+                continue
+            meta = self._parse_skill_md(d)
+            if meta and meta.get("name") == name:
+                plan_data = {}
+                plan_file = d / "plan.json"
+                if plan_file.exists():
+                    try:
+                        with open(plan_file) as fh:
+                            plan_data = json.load(fh)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                result = {"name": meta.get("name", name),
+                          "description": meta.get("description", "")}
+                result.update(plan_data)
+                return result
         return {}
 
     def _generalize_skill_name(self, plan: list[dict]) -> str:
@@ -499,7 +610,15 @@ class AgentCLI:
 
         for step in plan:
             for arg in step.get("args", []):
-                if (re.search(rf'(?:^|\s){re.escape(arg)}(?:\s|$)', task)
+                # Strip URL scheme for comparison — the task string may
+                # say "github.com/..." while the plan arg has
+                # "https://github.com/...".  We want to match either.
+                stripped = re.sub(r'^https?://', '', arg)
+                match_in_task = (
+                    re.search(rf'(?:^|\s){re.escape(arg)}(?:\s|$)', task)
+                    or re.search(rf'(?:^|\s){re.escape(stripped)}(?:\s|$)', task)
+                )
+                if (match_in_task
                         and arg not in STATIC_COMMAND_WORDS
                         and not arg.startswith("-")
                         and len(arg) > 1
@@ -541,11 +660,23 @@ class AgentCLI:
             return re.escape(task)
 
         # Find positions of all parameter values in the task string
+        # URL values like https://github.com/org/repo may not appear directly
+        # in the task string (which might say just github.com/org/repo),
+        # so we try both the full value and the scheme-stripped version.
         positions = []
         for value, name in params_map.items():
             idx = task.find(value)
+            stripped = re.sub(r'^https?://', '', value)
+            match_len = len(value)
+            if idx < 0 and stripped != value:
+                # Value not in task — try the stripped form
+                idx = task.find(stripped)
+                if idx >= 0:
+                    # The stripped form is what's actually in the task;
+                    # its length determines the static-text positions.
+                    match_len = len(stripped)
             if idx >= 0:
-                positions.append((idx, len(value), name, value))
+                positions.append((idx, match_len, name, value))
 
         # Sort by position (left to right)
         positions.sort(key=lambda x: x[0])
@@ -562,7 +693,9 @@ class AgentCLI:
                 parts.append(re.escape(task[last_end:idx]))
             # Choose capture pattern based on value type
             if re.match(r'https?://', value):
-                parts.append(rf"(?P<{name}>https?://\S+)")
+                # Make the scheme optional so the regex matches tasks
+                # with or without the https:// prefix
+                parts.append(rf"(?P<{name}>(?:https?://)?[\w.-]+(?:/[\w.-]+)+)")
             elif re.match(r'^\d+\.\d+', value):
                 parts.append(rf"(?P<{name}>\d+\.\d+(?:\.\d+)*)")
             else:
@@ -614,20 +747,26 @@ class AgentCLI:
 
     def _save_skill(self, task: str, plan: list[dict], success_condition: dict,
                     tools_used: list[str], success: bool = True) -> Optional[str]:
-        """Persist the completed task as a reusable, parameterized skill."""
+        """Persist the completed task as a reusable, parameterized skill.
+
+        Skills are stored in Anthropic SKILL.md directory format:
+          skills/<name>/SKILL.md  — frontmatter + instructions
+          skills/<name>/plan.json  — machine-readable plan data
+        """
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate a generalized skill name from the plan's action type
         skill_name = self._generalize_skill_name(plan)
-        skill_file = self.skills_dir / f"{skill_name}.json"
+        skill_dir = self.skills_dir / skill_name
 
-        # If skill already exists, check plan compatibility
-        existing = {}
-        if skill_file.exists():
+        # If skill directory already exists, check plan compatibility
+        plan_file = skill_dir / "plan.json"
+        existing_plan_data = {}
+        if plan_file.exists():
             try:
-                with open(skill_file) as fh:
-                    existing = json.load(fh)
-                existing_plan = existing.get("plan", [])
+                with open(plan_file) as fh:
+                    existing_plan_data = json.load(fh)
+                existing_plan = existing_plan_data.get("plan", [])
                 # Compare plan structure: same length AND same action+tool per step
                 same_structure = (
                     len(existing_plan) == len(plan)
@@ -641,28 +780,63 @@ class AgentCLI:
                     # Different plan structure — save as a variant
                     variant = len(plan)
                     skill_name = f"{skill_name}-{variant}"
-                    skill_file = self.skills_dir / f"{skill_name}.json"
-                    existing = {}
+                    skill_dir = self.skills_dir / skill_name
+                    existing_plan_data = {}
                 else:
                     # Same structure — bump success count, keep existing parameterization
-                    existing["success_count"] = existing.get("success_count", 0) + (1 if success else 0)
-                    with open(skill_file, "w") as fh:
-                        json.dump(existing, fh, indent=2)
-                    return str(skill_file)
+                    existing_plan_data["success_count"] = existing_plan_data.get("success_count", 0) + (1 if success else 0)
+                    with open(plan_file, "w") as fh:
+                        json.dump(existing_plan_data, fh, indent=2)
+                    return str(skill_dir)
             except (json.JSONDecodeError, IOError):
                 pass
 
         # New skill — parameterize the plan
         param_plan, params_map, task_regex = self._parameterize_plan(task, plan)
 
-        # Parameterize the success_condition too: replace concrete values with placeholders
+        # Parameterize the success_condition too
         param_condition = self._parameterize_success_condition(success_condition, params_map)
 
-        skill_data = {
+        # Build a human-readable description from the plan
+        actions = [s.get("action", "?") for s in param_plan]
+        desc = f"Auto-learned skill: {', '.join(actions)}"
+
+        # Write SKILL.md (Anthropic format)
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        tools_str = " ".join(sorted(set(tools_used)))
+        frontmatter = {
             "name": skill_name,
+            "description": desc,
+        }
+        if tools_str:
+            frontmatter["allowed-tools"] = tools_str
+
+        # Build instruction body
+        param_lines = []
+        for orig_val, param_name in params_map.items():
+            param_lines.append(f"- `{{{{{param_name}}}}}` — extracted from task string (was `{orig_val}`)")
+        params_section = ""
+        if param_lines:
+            params_section = (
+                "\n## Parameters\n\n"
+                "Values are extracted from the task string via `task_regex` "
+                "and substituted into the plan before execution.\n\n"
+                + "\n".join(param_lines) + "\n"
+            )
+
+        body = (
+            f"# {skill_name}\n\n"
+            f"{desc}\n"
+            f"{params_section}"
+        )
+        skill_md = f"---\n{yaml.dump(frontmatter, default_flow_style=False).strip()}\n---\n\n{body}"
+        with open(skill_dir / "SKILL.md", "w") as fh:
+            fh.write(skill_md)
+
+        # Write plan.json (machine-readable execution data)
+        plan_data = {
             "task_regex": task_regex,
             "task_pattern": task.lower(),  # legacy compat
-            "description": f"Parameterized skill: {skill_name}",
             "params_map": params_map,
             "plan": param_plan,
             "tools_used": sorted(set(tools_used)),
@@ -670,29 +844,42 @@ class AgentCLI:
             "success_count": 1 if success else 0,
             "invalidated": False,
         }
+        with open(plan_file, "w") as fh:
+            json.dump(plan_data, fh, indent=2)
+        return str(skill_dir)
 
-        with open(skill_file, "w") as fh:
-            json.dump(skill_data, fh, indent=2)
-        return str(skill_file)
+    def _find_skill_dir(self, skill_name: str) -> Optional[Path]:
+        """Find a skill directory by name. Returns the Path or None."""
+        self._migrate_legacy_skills()
+        skill_dir = self.skills_dir / skill_name
+        if skill_dir.is_dir():
+            return skill_dir
+        # Try matching against the 'name' field inside each directory's SKILL.md
+        for d in self.skills_dir.iterdir():
+            if not d.is_dir():
+                continue
+            meta = self._parse_skill_md(d)
+            if meta and meta.get("name") == skill_name:
+                return d
+        return None
 
     def invalidate_skill(self, skill_name: str) -> bool:
         """Mark a skill as invalidated so it won't be used."""
-        skill_file = self.skills_dir / f"{skill_name}.json"
-        if not skill_file.exists():
-            # Try exact file match with extension
-            for f in self.skills_dir.iterdir():
-                if f.stem == skill_name and f.suffix == ".json":
-                    skill_file = f
-                    break
-            else:
-                self.out.fatal(f"skill '{skill_name}' not found")
-                return False
+        skill_dir = self._find_skill_dir(skill_name)
+        if not skill_dir:
+            self.out.fatal(f"skill '{skill_name}' not found")
+            return False
+
+        plan_file = skill_dir / "plan.json"
+        if not plan_file.exists():
+            self.out.fatal(f"skill '{skill_name}' has no plan.json")
+            return False
 
         try:
-            with open(skill_file) as fh:
+            with open(plan_file) as fh:
                 data = json.load(fh)
             data["invalidated"] = True
-            with open(skill_file, "w") as fh:
+            with open(plan_file, "w") as fh:
                 json.dump(data, fh, indent=2)
             self.out.success(f"skill '{skill_name}' invalidated")
             return True
@@ -701,18 +888,13 @@ class AgentCLI:
             return False
 
     def delete_skill(self, skill_name: str) -> bool:
-        """Permanently remove a skill file."""
-        skill_file = self.skills_dir / f"{skill_name}.json"
-        if not skill_file.exists():
-            for f in self.skills_dir.iterdir():
-                if f.stem == skill_name and f.suffix == ".json":
-                    skill_file = f
-                    break
-            else:
-                self.out.fatal(f"skill '{skill_name}' not found")
-                return False
+        """Permanently remove a skill directory."""
+        skill_dir = self._find_skill_dir(skill_name)
+        if not skill_dir:
+            self.out.fatal(f"skill '{skill_name}' not found")
+            return False
 
-        skill_file.unlink()
+        shutil.rmtree(skill_dir)
         self.out.success(f"skill '{skill_name}' deleted")
         return True
 
@@ -1279,21 +1461,34 @@ if __name__ == "__main__":
 
     def _print_skill_detail(self, skill_name: str):
         """Print detailed information about a single skill."""
-        data = self._load_skill(skill_name)
-        if not data:
+        skill_dir = self._find_skill_dir(skill_name)
+        if not skill_dir:
             self.out.fatal(f"skill '{skill_name}' not found")
+            return
+
+        data = self._load_skill(skill_dir.name)
+        if not data:
+            self.out.fatal(f"skill '{skill_name}' has no data")
             return
 
         self.out.headline(data.get('name', skill_name))
         self.out.separator()
 
-        # Find the file path for this skill
-        for f in self.skills_dir.iterdir():
-            if f.is_file() and f.suffix == ".json" and (f.stem == skill_name or f.name == skill_name):
-                self.out.kv("file", str(f))
-                break
+        # Directory path
+        self.out.kv("dir", str(skill_dir))
 
-        # Overview
+        # Show SKILL.md body (instructions)
+        skill_md_path = skill_dir / "SKILL.md"
+        if skill_md_path.exists():
+            text = skill_md_path.read_text()
+            # Strip frontmatter, show body only
+            body = re.sub(r'^---\s*\n.*?\n---\s*\n', '', text, flags=re.DOTALL).strip()
+            if body:
+                self.out.section("SKILL.md")
+                for line in body.splitlines()[:20]:
+                    self.out.info(line)
+
+        # Overview from plan.json
         desc = data.get("description", "")
         if desc:
             self.out.kv("description", desc)

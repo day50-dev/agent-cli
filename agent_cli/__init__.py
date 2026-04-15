@@ -1167,10 +1167,19 @@ class AgentCLI:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            self.out.fatal(f"HTTP {e.code}: {e.reason}  ({url})")
+            body = ""
+            try:
+                body = e.read().decode()[:500]
+            except Exception:
+                pass
+            self.out.fatal(f"HTTP {e.code}: {e.reason}")
+            self._print_api_diagnostics(url)
+            if body:
+                self.out.kv("response", body)
             return
         except Exception as e:
             self.out.fatal(f"request failed: {e}")
+            self._print_api_diagnostics(url)
             return
 
         models = result.get("data", [])

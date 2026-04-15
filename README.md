@@ -13,16 +13,14 @@ You describe what you want. `ac` figures out the tools, asks before touching any
 ## Install
 
 ```bash
-pipx install agent-cli
-# or: pip install --user agent-cli
+uvx/pipx/uv tool agentcli
 ```
 
 Then point it at any OpenAI-compatible API:
 
 ```bash
-ac -s model "gpt-4o"
-ac -s base_url "https://api.openai.com/v1"
-ac -s key "sk-..."
+ac -s model "gemma4:9b"
+ac -s base_url "http://localhost:11434/"
 ```
 
 ---

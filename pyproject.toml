@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-cli"
+name = "agentcli"
 version = "0.1.0"
 description = "A one-shot command-line helper with scoped execution tasks"
 readme = "README.md"
@@ -24,11 +24,11 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml",
-    "streamdown>=0.35",
+    "streamdown>=0.36",
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/agent-cli"
+Homepage = "https://github.com/day50/agent-cli"
 
 [project.scripts]
 agent-cli = "agent_cli:main"

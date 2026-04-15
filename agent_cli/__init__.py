@@ -182,6 +182,9 @@ class Output:
         """Sub-step / phase header — groups related output."""
         self._render(f"\n### {text}\n")
 
+    def subsection(self, text: str) -> None:
+        self._render(f"\n#### {text}\n")
+
     def success(self, text: str) -> None:
         """Positive outcome: approved, completed, confirmed."""
         self._render(f"✓ {text}\n")
@@ -301,7 +304,6 @@ class AgentCLI:
         self.auto_yes = auto_yes
         self.tools_dir = self.config_dir / "tools"
         self.skills_dir = self.config_dir / "skills"
-        self.custom_tools_dir = self.tools_dir / "custom" / "bin"
         self.config_file = self.config_dir / "config.json"
 
         self.model_config = {
@@ -350,12 +352,7 @@ class AgentCLI:
         """Display current model configuration values."""
         self.out.section("Model Config")
         for key, value in self.model_config.items():
-            if key == "key" and value:
-                # Mask the API key for security
-                masked = value[:4] + "****" + value[-4:] if len(value) > 8 else "****"
-                self.out.kv(key, masked)
-            else:
-                self.out.kv(key, value or "(not set)")
+            self.out.kv(key, value or "(not set)")
 
     # ------------------------------------------------------------------
     # Directory & symlink setup
@@ -363,7 +360,6 @@ class AgentCLI:
     def _setup_directories(self):
         self.tools_dir.mkdir(parents=True, exist_ok=True)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
-        self.custom_tools_dir.mkdir(parents=True, exist_ok=True)
 
     def _setup_default_tools(self):
         """Create symlinks for the minimal default tool set."""
@@ -640,10 +636,6 @@ class AgentCLI:
         for skill in self.get_available_skills():
             regex = skill.get("task_regex", "")
             if not regex:
-                # Fallback: try legacy task_pattern substring matching
-                pattern = skill.get("task_pattern", "").lower()
-                if pattern and (pattern in task.lower() or task.lower() in pattern):
-                    return skill
                 continue
             try:
                 match = re.search(regex, task, re.IGNORECASE)
@@ -888,6 +880,11 @@ class AgentCLI:
           skills/<name>/SKILL.md  — frontmatter + instructions
           skills/<name>/plan.json  — machine-readable plan data
         """
+        # Don't save skills that don't actually do anything
+        if not tools_used:
+            self.out.info("no tools used — skill not saved (empty plans are useless)")
+            return None
+
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate a generalized skill name from the plan's action type
@@ -981,7 +978,6 @@ class AgentCLI:
         # Write plan.json (machine-readable execution data)
         plan_data = {
             "task_regex": task_regex,
-            "task_pattern": task.lower(),  # legacy compat
             "params_map": params_map,
             "plan": param_plan,
             "tools_used": sorted(set(tools_used)),
@@ -1038,6 +1034,11 @@ class AgentCLI:
             self.out.info("skill has no saved plan")
             return False
 
+        # Reject skills where no step actually does anything
+        if not any(step.get("tool") for step in plan):
+            self.out.warning(f"skill '{skill_meta['name']}' has no executable steps — skipping")
+            return False
+
         # Get extracted parameters (set by _find_applicable_skill)
         extracted_params = skill_meta.get("_extracted_params", {})
 
@@ -1084,7 +1085,7 @@ class AgentCLI:
 
         # Execute
         for i, step in enumerate(resolved_plan):
-            self.out.section(f"skill step {i + 1}: {step['action']}")
+            self.out.subsection(f"skill step {i + 1}: {step['action']}")
             tool = step.get("tool")
             args = step.get("args", [])
 
@@ -1097,7 +1098,8 @@ class AgentCLI:
                     for line in err.strip().splitlines():
                         self.out.output(line)
             else:
-                self.out.info("no tool for this step")
+                self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
+                return False
 
         return True
 
@@ -1198,21 +1200,15 @@ class AgentCLI:
 
     def list_models(self):
         """Query the /models endpoint and display available models."""
-        if not self.model_config.get("key"):
-            self.out.fatal("no API key configured — run: ac -s key <your-key>")
-            return
-
         base_url = self._resolve_base_url()
         url = f"{base_url}/models"
 
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.model_config['key']}",
-            },
-        )
+        headers = {}
+        if self.model_config.get("key"):
+            headers["Authorization"] = f"Bearer {self.model_config['key']}"
+        req = urllib.request.Request(url, headers=headers)
         try:
             with self.out.spinner(f"Fetching models from {base_url}"):
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -1280,8 +1276,6 @@ class AgentCLI:
 
     def _call_model(self, messages: list[dict]) -> Optional[str]:
         """Call the configured model via OpenAI-compatible API. Returns response text or None."""
-        if not self.model_config.get("model") or not self.model_config.get("key"):
-            return None
 
         import urllib.error
         import urllib.request
@@ -1289,16 +1283,19 @@ class AgentCLI:
         base_url = self._resolve_base_url()
         url = f"{base_url}/chat/completions"
 
+        model_name = self.model_config.get("model", "")
         payload = {
-            "model": self.model_config["model"],
             "messages": messages,
             "temperature": 0.1,
         }
+        if model_name:
+            payload["model"] = model_name
         data = json.dumps(payload).encode()
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.model_config['key']}",
         }
+        if self.model_config.get("key"):
+            headers["Authorization"] = f"Bearer {self.model_config['key']}"
         req = urllib.request.Request(url, data=data, headers=headers)
 
         # If --curlify was requested, print the curl equivalent and exit cleanly
@@ -1333,12 +1330,9 @@ class AgentCLI:
     # ------------------------------------------------------------------
     def _create_plan(self, task: str) -> list[dict]:
         """
-        Build a step-by-step plan using the LLM when configured,
-        otherwise fall back to heuristic parsing.
+        Build a step-by-step plan using the LLM.
 
-        The agent has two choices at each step:
-        a) Use an existing symlinked tool, or
-        b) Write a custom program (stored in tools/custom/bin).
+        Each step specifies a tool to run and arguments for it.
         """
         tools = self.all_tool_names()
         cwd = Path.cwd()
@@ -1347,14 +1341,18 @@ class AgentCLI:
             "You are a task planner for a command-line agent. "
             "Given a user task, available system tools, and directory context, "
             "produce a JSON array of plan steps. Each step is an object with:\n"
-            '  - "action": a GENERIC verb-only description of the step (e.g. "clone_repository", "install_package", "list_directory"). '
+            '  - "action": a SHORT verb-only description of the step (e.g. "clone_repo", "read_file", "list_dir"). '
             '    Do NOT include specific URLs, names, or values — those go in "args". '
             '    The action is the function; the args are the parameters.\n'
-            '  - "tool": tool name (from the available list), or null to write a custom program\n'
+            '  - "tool": MUST be one of the available tools listed below. Do NOT invent tool names.\n'
             '  - "args": list of string arguments for that tool (this is where specific values go)\n'
             "Return ONLY valid JSON, no markdown, no explanation.\n"
-            "If the task involves cloning repos, create one step per repo. "
-            "If a directory name is specified (e.g., 'as dir_name'), use it as the last argument."
+            "IMPORTANT: The 'tool' field MUST be exactly one of the available tools. "
+            "Do NOT use the task description as a tool name. Do NOT invent new tool names. "
+            "If no available tool can accomplish the task, use the closest one with appropriate args.\n"
+            "For example, to read /proc/cpuinfo, use tool 'cat' with args ['/proc/cpuinfo']. "
+            "To list directory contents, use tool 'ls' with args ['-la']. "
+            "To read the first lines of a file, use tool 'head' with args ['-n', '20', '/path/to/file']."
         )
 
         user_prompt = (
@@ -1365,21 +1363,12 @@ class AgentCLI:
             f"Dirs: {', '.join(d.name for d in cwd.iterdir() if d.is_dir())[:200]}"
         )
 
-        has_model = bool(self.model_config.get("model") and self.model_config.get("key"))
-
-        if not has_model:
-            # No model configured — fall straight to heuristics
-            self.out.warning("using heuristic plan (no model configured)")
-            return self._heuristic_plan(task)
-
         result = self._call_model([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
 
         if result is None:
-            # Model call failed — error details already printed by _call_model.
-            # This is fatal; don't silently fall back to heuristics.
             self.out.fatal("cannot proceed without a working model connection")
             sys.exit(1)
 
@@ -1400,140 +1389,42 @@ class AgentCLI:
                 self.out.success("plan generated by model")
                 return plan
         except (json.JSONDecodeError, ValueError, KeyError):
-            self.out.warning("model response unparsable — falling back to heuristics")
+            self.out.fatal("model response was not valid JSON — cannot proceed")
+            sys.exit(1)
 
-        # --- heuristic fallback (only on unparsable response, not on API failure) ---
-        return self._heuristic_plan(task)
+        self.out.fatal("no plan produced")
+        sys.exit(1)
 
-    def _heuristic_plan(self, task: str) -> list[dict]:
-        """Regex-based plan creation as fallback when no LLM is available."""
-        task_lower = task.lower()
-        plan = []
-
-        # --- clone / repo tasks: support multiple repos ---
-        if any(kw in task_lower for kw in ("clone", "repo", "repository")):
-            # Find all github.com/... patterns, each possibly with "as name"
-            segments = re.split(r'\b(clone|and)\b', task_lower)
-            for seg in segments:
-                seg = seg.strip()
-                if not seg:
-                    continue
-                # Extract repo URL
-                url = None
-                url_match = re.search(
-                    r'(https?://[\w.-]+/[\w.-]+/[\w.-]+?)(?:\.git)?\b', seg,
-                )
-                if url_match:
-                    url = url_match.group(1)
-                else:
-                    gh = re.search(r'github\.com/([\w.-]+/[\w.-]+)', seg)
-                    if gh:
-                        url = f"https://github.com/{gh.group(1)}"
-                    else:
-                        for host in ("gitlab.com", "bitbucket.org"):
-                            m = re.search(rf'{host}/([\w.-]+/[\w.-]+)', seg)
-                            if m:
-                                url = f"https://{host}/{m.group(1)}"
-                                break
-
-                if not url:
-                    continue
-
-                # Check for "as <dir_name>"
-                args = ["clone", url]
-                as_match = re.search(r'\bas\s+(\S+)', seg)
-                if as_match:
-                    args.append(as_match.group(1))
-
-                plan.append({"action": "clone_repository", "tool": "git", "args": args})
-
-            if not plan:
-                plan.append({"action": "clone_repository", "tool": "git", "args": ["clone", task_lower.split()[-1]]})
-            return plan
-
-        # --- file listing ---
-        if any(kw in task_lower for kw in ("list", "show files", "what files")):
-            plan.append({"action": "list_directory", "tool": "ls", "args": ["-la"]})
-            return plan
-
-        # --- read / cat ---
-        if any(kw in task_lower for kw in ("read", "cat ", "show content")):
-            parts = task_lower.split()
-            target = parts[-1] if parts else "."
-            plan.append({"action": "read_file", "tool": "cat", "args": [target]})
-            return plan
-
-        # --- help / docs ---
-        if any(kw in task_lower for kw in ("help", "docs", "man", "documentation")):
-            parts = task_lower.split()
-            topic = parts[-1] if parts else ""
-            plan.append({"action": "read_manual", "tool": "man", "args": [topic]})
-            return plan
-
-        # --- generic ---
-        plan.append({"action": "execute_task", "tool": None, "write_program": True})
-        return plan
 
     def _validate_plan(self, plan: list[dict]) -> bool:
-        """Walk through each step, check tool availability, ask to install missing."""
+        """Validate that every step uses a tool from the available list."""
+        available = self.all_tool_names()
         for i, step in enumerate(plan):
             tool = step.get("tool")
             if not tool:
-                continue  # write_program path — always valid
+                self.out.fatal(f"step {i + 1} ('{step.get('action', '?')}') has no tool — cannot execute")
+                return False
 
             self.out.section(f"validate  step {i + 1}: {step['action']}")
 
-            if tool in self.all_tool_names():
-                self.out.success(f"tool '{tool}' already available")
-            else:
-                # Tool not symlinked — try to discover it
-                if self.discover_tool(tool):
-                    if self.symlink_tool(tool, auto_yes=self.auto_yes):
-                        self.out.success(f"tool '{tool}' linked and ready")
-                    else:
-                        self.out.fatal(f"cannot proceed without '{tool}'")
-                        return False
+            if tool in available:
+                self.out.success(f"tool '{tool}' available")
+            elif self.discover_tool(tool):
+                # Known system tool not yet symlinked — offer to add it
+                if self.symlink_tool(tool, auto_yes=self.auto_yes):
+                    self.out.success(f"tool '{tool}' linked and ready")
+                    available.add(tool)  # update for subsequent checks
                 else:
-                    self.out.fatal(f"'{tool}' not found on this system")
-                    self.out.prompt(f"Install '{tool}' and retry? (y/n): ", end="")
-                    resp = sys.stdin.readline().strip().lower()
-                    if resp == "y":
-                        self.out.info(f"please install '{tool}' then re-run the task")
+                    self.out.fatal(f"cannot proceed without '{tool}'")
                     return False
+            else:
+                self.out.fatal(f"model returned unknown tool '{tool}' — not in available tools and not found on system")
+                return False
         return True
 
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
-    def _write_custom_program(self, task: str) -> Optional[str]:
-        """
-        Write a small Python script into tools/custom/bin that attempts
-        to accomplish the task.  Returns the script path or None.
-        """
-        self.custom_tools_dir.mkdir(parents=True, exist_ok=True)
-        script_name = re.sub(r'[^a-z0-9]+', '_', task.lower().strip())[:40]
-        script_path = self.custom_tools_dir / f"{script_name}.py"
-
-        body = f'''#!/usr/bin/env python3
-"""Auto-generated helper for: {task}"""
-import subprocess, sys, os
-from pathlib import Path
-
-def main():
-    # TODO: implement logic for "{task}"
-    print("Executing: {task}")
-
-if __name__ == "__main__":
-    main()
-'''
-        script_path.write_text(body)
-        script_path.chmod(0o755)
-        # Symlink into our tool list
-        link = self.custom_tools_dir / script_name
-        if not link.exists():
-            link.symlink_to(script_path)
-        return str(script_path)
-
     def _execute_plan(self, plan: list[dict], task: str) -> bool:
         for i, step in enumerate(plan):
             self.out.section(f"execute  step {i + 1}: {step['action']}")
@@ -1548,16 +1439,9 @@ if __name__ == "__main__":
                 if err.strip():
                     for line in err.strip().splitlines():
                         self.out.output(line)
-            elif step.get("write_program"):
-                script = self._write_custom_program(task)
-                if script:
-                    self.out.success(f"custom program written to {script}")
-                    self.out.info("review and run manually")
-                else:
-                    self.out.fatal("failed to write custom program")
-                    return False
             else:
-                self.out.info("no specific tool — executing task directly")
+                self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
+                return False
 
         return True
 
@@ -1569,7 +1453,7 @@ if __name__ == "__main__":
         self.out.separator()
 
         # 1. Define success condition
-        self.out.section("success condition")
+        self.out.section("Success Condition")
         success = self._define_success_condition(task)
         self.out.info(success['description'])
 
@@ -1652,81 +1536,22 @@ if __name__ == "__main__":
         self.out.markdown(self._skills_markdown())
 
     def _print_skill_detail(self, skill_name: str):
-        """Print detailed information about a single skill."""
+        """Print raw skill data for debugging — no formatting."""
         skill_dir = self._find_skill_dir(skill_name)
         if not skill_dir:
             self.out.fatal(f"skill '{skill_name}' not found")
             return
 
-        data = self._load_skill(skill_dir.name)
-        if not data:
-            self.out.fatal(f"skill '{skill_name}' has no data")
-            return
-
-        md = f"# {data.get('name', skill_name)}\n\n"
-        md += f"**dir:** `{_md_escape(str(skill_dir))}`\n\n"
-
-        # Show SKILL.md body (instructions)
+        # SKILL.md
         skill_md_path = skill_dir / "SKILL.md"
         if skill_md_path.exists():
-            text = skill_md_path.read_text()
-            # Strip frontmatter, show body only
-            body = re.sub(r'^---\s*\n.*?\n---\s*\n', '', text, flags=re.DOTALL).strip()
-            if body:
-                md += body + "\n\n"
+            print(skill_md_path.read_text())
 
-        # Overview from plan.json
-        desc = data.get("description", "")
-        if desc:
-            md += f"**description:** {desc}\n\n"
-        md += f"**success_count:** {data.get('success_count', 0)}×\n\n"
-        tools = data.get("tools_used", [])
-        if tools:
-            md += f"**tools:** `{'`, `'.join(_md_escape(t) for t in tools)}`\n\n"
-
-        # Pattern / regex
-        regex = data.get("task_regex", "")
-        pattern = data.get("task_pattern", "")
-        md += "### Matching\n"
-        if regex:
-            md += f"**task_regex:** `{_md_escape(regex)}`\n\n"
-        if pattern:
-            md += f"**task_pattern:** `{_md_escape(pattern)}`\n\n"
-
-        # Parameters
-        params = data.get("params_map", {})
-        if params:
-            md += "### Parameters\n"
-            for orig, pname in params.items():
-                md += f"- **{pname}:** `{_md_escape(orig)}`\n"
-            md += "\n"
-
-        # Plan
-        plan = data.get("plan", [])
-        if plan:
-            md += "### Plan\n"
-            for i, step in enumerate(plan):
-                tool = step.get("tool", "custom")
-                args = step.get("args", [])
-                args_str = ' '.join(args) if args else ''
-                md += f"{i + 1}. **{step.get('action', '?')}**  (`{_md_escape(tool)}`) `{_md_escape(args_str)}`\n"
-            md += "\n"
-
-        # Success condition
-        condition = data.get("success_condition", {})
-        if condition:
-            md += "### Success Condition\n"
-            cond_desc = condition.get("description", "")
-            if cond_desc:
-                md += f"> {cond_desc}\n"
-            ctype = condition.get("type", "")
-            if ctype:
-                md += f"**type:** `{_md_escape(ctype)}`\n\n"
-            for key in ("expect_dirs", "expect_dir"):
-                if key in condition:
-                    md += f"**{key}:** `{_md_escape(str(condition[key]))}`\n\n"
-
-        self.out.markdown(md)
+        # plan.json
+        plan_path = skill_dir / "plan.json"
+        if plan_path.exists():
+            with open(plan_path) as f:
+                print(json.dumps(json.load(f), indent=2))
 
 
 def main():

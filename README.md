@@ -2,9 +2,7 @@
 
 > The coolest terminal agent ever
 
-```bash
-ac "how much disk space do I have remaining"
-```
+https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 
 You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
 

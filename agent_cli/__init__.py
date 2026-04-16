@@ -105,18 +105,6 @@ _ANSI_YELLOW = "\033[33m"
 _ANSI_CYAN   = "\033[36m"
 _ANSI_BLUE   = "\033[34m"
 
-# Command words and flags that should NOT be turned into skill parameters.
-# These are static command sub-words (like "clone" in "git clone") that are
-# part of the tool's interface, not variable inputs.
-STATIC_COMMAND_WORDS = {
-    "clone", "init", "add", "commit", "push", "pull", "fetch", "checkout",
-    "ls", "cat", "head", "tail", "man", "cp", "mv", "rm", "mkdir", "rmdir",
-    "install", "build", "test", "run", "start", "stop", "status", "log",
-    "diff", "branch", "merge", "rebase", "create", "delete", "update",
-    "list", "show", "read", "write", "generate", "new", "and", "or",
-}
-
-
 # ------------------------------------------------------------------
 # Markdown helpers
 # ------------------------------------------------------------------
@@ -246,6 +234,10 @@ class Output:
     def kv(self, key: str, value: str) -> None:
         """Key-value pair in a detail view (left-aligned label + value)."""
         self._render(f"* {key}: `{_md_escape(value)}`\n")
+
+    def sublist(self, text: str) -> None:
+        """Sub-list item (indented under a parent list item)."""
+        self._render(f"  - {text}\n")
 
     # ---- markdown rendering (streamdown) ----
 
@@ -700,8 +692,9 @@ class AgentCLI:
             name = (skill_md_meta or {}).get("name", d.name)
             skills.append({
                 "name": name,
-                "dir": str(d),                "description": (skill_md_meta or {}).get("description", ""),
-                 "params_map": plan_data.get("params_map", {}),
+                "dir": str(d),
+                "description": (skill_md_meta or {}).get("description", ""),
+                "params_map": plan_data.get("params_map", {}),
                 "success_count": plan_data.get("success_count", 1),
                 "tools_used": plan_data.get("tools_used", []),
             })
@@ -767,7 +760,7 @@ class AgentCLI:
         try:
             parsed = json.loads(result)
             matched_name = parsed.get("matched_skill")
-            if not matched_name:
+            if not matched_name or matched_name == "null":
                 return None
             for s in skills:
                 if s["name"] == matched_name:
@@ -821,150 +814,79 @@ class AgentCLI:
                 return result
         return {}
 
-    def _generalize_skill_name(self, plan: list[dict]) -> str:
-        """Derive a generalized skill name from the plan's primary action.
+    def _analyze_plan(self, task: str, plan: list[dict]) -> tuple[str, list[dict], dict[str, str]]:
+        """Ask the LLM to name the skill, identify variable args, and parameterize the plan.
 
-        E.g. plan with action 'clone_repository' → 'clone-repository'
+        Replaces the former heuristic chain (_generalize_skill_name +
+        _infer_param_name + _parameterize_plan) with a single LLM call
+        that understands semantics — e.g. that 'clone' in "git clone" is a
+        static sub-command while the URL is the variable input.
 
-        The action should be a generic verb (the function), not the subject.
-        As a safety net, if the action is over-specific (3+ underscore
-        parts like 'clone_the_akash_network'), only the verb part is
-        kept ('clone').
-        """
-        for step in plan:
-            action = step.get("action", "")
-            if not action:
-                continue
-            name = action.replace("-", "_").lower()
-            parts = name.split("_")
-            if len(parts) <= 2:
-                # Short, generic action like 'clone_repository' — use as-is
-                return name.replace("_", "-")
-            # Over-specific — keep verb + first noun (e.g. install_python)
-            return "_".join(parts[:2])
-        return "generic-task"
-
-    def _infer_param_name(self, value: str) -> str:
-        """Generate a semantic parameter name based on the value type."""
-        if re.match(r'https?://', value):
-            return "repo_url"
-        if re.match(r'^\d+\.\d+', value):
-            return "version"
-        if '/' in value and not value.startswith('/') and not value.startswith('-'):
-            return "repo_path"
-        return "target"
-
-    def _parameterize_plan(self, task: str, plan: list[dict]) -> tuple[list[dict], dict[str, str], str]:
-        """Replace specific values in plan with placeholders.
-
-        Returns (param_plan, params_map, task_regex) where:
-          param_plan: plan with {{param_name}} placeholders in args
+        Returns (skill_name, parameterized_plan, params_map) where:
+          skill_name: short, generic, filesystem-safe (e.g. 'clone-repo')
+          parameterized_plan: plan with {{param_name}} in args
           params_map: {original_value: param_name}
-          task_regex: regex to extract params from future task strings
+
+        Falls back to ("generic-task", plan, {}) on LLM failure.
         """
-        # 1. Collect variable values from the plan that appear in the task
-        params_map = {}  # value → param_name
-        name_counts = {}  # param_name → count (for dedup)
+        fallback = ("generic-task", plan, {})
 
-        for step in plan:
-            for arg in step.get("args", []):
-                # Strip URL scheme for comparison — the task string may
-                # say "github.com/..." while the plan arg has
-                # "https://github.com/...".  We want to match either.
-                stripped = re.sub(r'^https?://', '', arg)
-                match_in_task = (
-                    re.search(rf'(?:^|\s){re.escape(arg)}(?:\s|$)', task)
-                    or re.search(rf'(?:^|\s){re.escape(stripped)}(?:\s|$)', task)
-                )
-                if (match_in_task
-                        and arg not in STATIC_COMMAND_WORDS
-                        and not arg.startswith("-")
-                        and len(arg) > 1
-                        and arg not in params_map):
-                    name = self._infer_param_name(arg)
-                    # Handle name collisions (e.g. multiple URLs → repo_url, repo_url_2)
-                    if name in name_counts:
-                        name_counts[name] += 1
-                        name = f"{name}_{name_counts[name]}"
-                    else:
-                        name_counts[name] = 1
-                    params_map[arg] = name
+        system_prompt = (
+            "You are a skill extraction assistant for a command-line agent. "
+            "Given a user task and the execution plan that fulfilled it, your job is to:\n"
+            "1. Generate a short, generic skill name (e.g. 'clone-repo', 'check-disk-space').\n"
+            "2. Identify which arguments in the plan are VARIABLE inputs from the "
+            "user's task (URLs, paths, repo names, versions, branch names, etc.).\n"
+            "   Do NOT parameterize static command sub-words (clone, ls, install, etc.) "
+            "or flags (-v, --all, -h, etc.) — those are part of the tool's interface.\n"
+            "3. Give each variable a semantic parameter name (e.g. 'repository_url', "
+            "'target_dir', 'branch_name').\n"
+            "4. Return the plan with variable args replaced by {{param_name}}.\n\n"
+            "Respond ONLY with valid JSON:\n"
+            "{\n"
+            '  "skill_name": "...",\n'
+            '  "params_map": { "original_value": "param_name" },\n'
+            '  "parameterized_plan": [ { "action": "...", "tool": "...", "args": ["...", "{{param_name}}"] } ]\n'
+            "}"
+        )
+        user_prompt = (
+            f"Task: {task}\n"
+            f"Plan:\n{json.dumps(plan, indent=2)}"
+        )
 
-        # 2. Build parameterized plan
-        param_plan = []
-        for step in plan:
-            new_step = dict(step)
-            new_args = []
-            for arg in step.get("args", []):
-                if arg in params_map:
-                    new_args.append(f"{{{{{params_map[arg]}}}}}")
-                else:
-                    new_args.append(arg)
-            new_step["args"] = new_args
-            param_plan.append(new_step)
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        if not result:
+            return fallback
 
-        # 3. Build task_regex from task string
-        task_regex = self._build_task_regex(task, params_map)
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r'^```(?:json)?\n?', '', result)
+            result = re.sub(r'\n?```$', '', result)
+            result = result.strip()
 
-        return param_plan, params_map, task_regex
+        try:
+            parsed = json.loads(result)
+            skill_name = parsed.get("skill_name", "generic-task")
+            params_map = parsed.get("params_map", {})
+            param_plan = parsed.get("parameterized_plan", plan)
 
-    def _build_task_regex(self, task: str, params_map: dict[str, str]) -> str:
-        """Build a regex that captures parameter values from future task strings.
+            # Basic validation
+            if not isinstance(param_plan, list) or not isinstance(params_map, dict):
+                return fallback
+            if len(param_plan) != len(plan):
+                return fallback
 
-        Static parts of the task are re.escape()'d; variable parts become
-        named capture groups like (?P<repo_url>https?://\\S+).
-        """
-        if not params_map:
-            return re.escape(task)
+            # Make skill name filesystem-safe
+            skill_name = re.sub(r'[^\w-]', '-', skill_name).strip('-').lower() or "generic-task"
 
-        # Find positions of all parameter values in the task string
-        # URL values like https://github.com/org/repo may not appear directly
-        # in the task string (which might say just github.com/org/repo),
-        # so we try both the full value and the scheme-stripped version.
-        positions = []
-        for value, name in params_map.items():
-            idx = task.find(value)
-            stripped = re.sub(r'^https?://', '', value)
-            match_len = len(value)
-            if idx < 0 and stripped != value:
-                # Value not in task — try the stripped form
-                idx = task.find(stripped)
-                if idx >= 0:
-                    # The stripped form is what's actually in the task;
-                    # its length determines the static-text positions.
-                    match_len = len(stripped)
-            if idx >= 0:
-                positions.append((idx, match_len, name, value))
+            return skill_name, param_plan, params_map
+        except (json.JSONDecodeError, ValueError):
+            return fallback
 
-        # Sort by position (left to right)
-        positions.sort(key=lambda x: x[0])
 
-        # Build regex by alternating escaped static text with capture groups
-        parts = []
-        last_end = 0
-        for idx, length, name, value in positions:
-            # Skip overlapping positions
-            if idx < last_end:
-                continue
-            # Escape static part before this parameter
-            if idx > last_end:
-                parts.append(re.escape(task[last_end:idx]))
-            # Choose capture pattern based on value type
-            if re.match(r'https?://', value):
-                # Make the scheme optional so the regex matches tasks
-                # with or without the https:// prefix
-                parts.append(rf"(?P<{name}>(?:https?://)?[\w.-]+(?:/[\w.-]+)+)")
-            elif re.match(r'^\d+\.\d+', value):
-                parts.append(rf"(?P<{name}>\d+\.\d+(?:\.\d+)*)")
-            else:
-                parts.append(rf"(?P<{name}>\S+)")
-            last_end = idx + length
-
-        # Remaining static part after last parameter
-        if last_end < len(task):
-            parts.append(re.escape(task[last_end:]))
-
-        return "".join(parts)
 
     def _parameterize_success_condition(self, condition: str, params_map: dict[str, str]) -> str:
         """Replace concrete values in the success condition string with {{param}} placeholders.
@@ -993,8 +915,8 @@ class AgentCLI:
 
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate a generalized skill name from the plan's action type
-        skill_name = self._generalize_skill_name(plan)
+        # Generate skill name and parameterize plan via LLM
+        skill_name, param_plan, params_map = self._analyze_plan(task, plan)
         skill_dir = self.skills_dir / skill_name
 
         # If skill directory already exists, check plan compatibility
@@ -1029,9 +951,6 @@ class AgentCLI:
             except (json.JSONDecodeError, IOError):
                 pass
 
-        # New skill — parameterize the plan
-        param_plan, params_map, task_regex = self._parameterize_plan(task, plan)
-
         # Parameterize the success_condition too
         param_condition = self._parameterize_success_condition(success_condition, params_map)
 
@@ -1047,7 +966,7 @@ class AgentCLI:
                 desc_parts.append(f"{a} (×{count})")
             else:
                 desc_parts.append(a)
-        desc = f"Auto-learned skill: {', '.join(desc_parts)}"
+        desc = ', '.join(desc_parts)
 
         # Write SKILL.md (Anthropic format)
         skill_dir.mkdir(parents=True, exist_ok=True)
@@ -1067,7 +986,7 @@ class AgentCLI:
         if param_lines:
             params_section = (
                 "\n### Parameters\n"
-                "Values are extracted from the task string via `task_regex` "
+                "Values are extracted from the task string by the LLM "
                 "and substituted into the plan before execution.\n\n"
                 + "\n".join(param_lines) + "\n"
             )
@@ -1083,7 +1002,6 @@ class AgentCLI:
 
         # Write plan.json (machine-readable execution data)
         plan_data = {
-            "task_regex": task_regex,
             "params_map": params_map,
             "plan": param_plan,
             "tools_used": sorted(set(tools_used)),
@@ -1688,10 +1606,14 @@ class AgentCLI:
             md += "*none yet — they are saved automatically on success*\n"
             return md
         for s in skills:
-            tools_str = f" [`{'`, `'.join(_md_escape(t) for t in s['tools_used'])}`]" if s.get("tools_used") else ""
-            md += f"- **{s['name']}**  {s['success_count']}×{tools_str}\n"
-            if s.get("description"):
-                md += f"  {s['description']}\n"
+            md += f"- **{s['name']}**\n"
+            if s.get("tools_used"):
+                md += f"  - uses: {', '.join(f'`{_md_escape(t)}`' for t in s['tools_used'])}\n"
+            count = s.get('success_count', 0)
+            if count > 0:
+                md += f"  - verified ({count}x)\n"
+            else:
+                md += f"  - unverified\n"
         return md
 
     def _print_skills(self):

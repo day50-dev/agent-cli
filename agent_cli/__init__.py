@@ -585,7 +585,7 @@ class AgentCLI:
     #     SKILL.md   — YAML frontmatter (name, description) + markdown
     #                   body with instructions / context for LLM use
     #     plan.json  — machine-readable execution data:
-    #                   plan, params_map, task_regex, success_condition,
+    #                   plan, params_map, success_condition,
     #                   success_count, tools_used
     #
     # This follows the Agent Skills standard (agentskills.io) and is
@@ -639,7 +639,7 @@ class AgentCLI:
                 f"{desc}\n\n"
                 f"### Parameters\n"
                 "This skill is parameterized.  Values are extracted from the\n"
-                "user's task string via `task_regex` and substituted into the\n"
+                "user's task string and substituted into the\n"
                 "plan before execution.\n"
             )
             skill_md = f"---\n{yaml.dump(frontmatter, default_flow_style=False).strip()}\n---\n\n{body}"
@@ -700,34 +700,83 @@ class AgentCLI:
             name = (skill_md_meta or {}).get("name", d.name)
             skills.append({
                 "name": name,
-                "dir": str(d),
-                "description": (skill_md_meta or {}).get("description", ""),
-                "task_regex": plan_data.get("task_regex", ""),
-                "params_map": plan_data.get("params_map", {}),
+                "dir": str(d),                "description": (skill_md_meta or {}).get("description", ""),
+                 "params_map": plan_data.get("params_map", {}),
                 "success_count": plan_data.get("success_count", 1),
                 "tools_used": plan_data.get("tools_used", []),
             })
         return skills
 
     def _find_applicable_skill(self, task: str) -> Optional[dict]:
-        """Find a skill that matches the task using the stored task_regex pattern.
+        """Find a skill that matches the task by consulting the LLM.
 
-        When a match is found, the extracted parameter values are stored
-        in skill["_extracted_params"] for use by apply_skill().
+        Presents the task and available skill summaries to the model,
+        which decides whether any skill applies and extracts parameter
+        values.  The extracted values are stored in
+        skill["_extracted_params"] for use by apply_skill().
+
+        Returns the matched skill dict, or None if no skill applies.
         """
-        for skill in self.get_available_skills():
-            regex = skill.get("task_regex", "")
-            if not regex:
-                continue
-            try:
-                match = re.search(regex, task, re.IGNORECASE)
-                if match:
-                    # Store extracted parameters for use by apply_skill
-                    skill["_extracted_params"] = match.groupdict()
-                    return skill
-            except re.error:
-                # Invalid regex in skill file — skip it
-                continue
+        skills = self.get_available_skills()
+        if not skills:
+            return None
+
+        # Build a minimal summary of each skill for the LLM
+        skills_info = []
+        for s in skills:
+            param_names = sorted(set(s.get("params_map", {}).values()))
+            skills_info.append({
+                "name": s["name"],
+                "description": s["description"],
+                "tools_used": s.get("tools_used", []),
+                "parameters_to_extract": param_names,
+            })
+
+        system_prompt = (
+            "You are a skill matcher for a command-line agent. "
+            "Determine if any of the available skills completely handles the "
+            "user's task.  CRITICAL: Do NOT match a generic skill (e.g. one "
+            "that just runs 'cat' or 'ls') when the user's task clearly needs "
+            "a purpose-built tool (e.g. 'df' for disk space, 'free' for memory). "
+            "A skill must be a SPECIFIC, meaningful procedure — not a single "
+            "trivial command.  If no skill is a genuine fit, respond with null.\n\n"
+            "Respond ONLY with valid JSON in this exact format:\n"
+            "{\n"
+            '  "matched_skill": "skill_name_or_null",\n'
+            '  "extracted_params": { "param_name": "extracted_value" }\n'
+            "}"
+        )
+        user_prompt = (
+            f"User task: {task}\n\n"
+            f"Available skills:\n{json.dumps(skills_info, indent=2)}"
+        )
+
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        if not result:
+            return None
+
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r'^```(?:json)?\n?', '', result)
+            result = re.sub(r'\n?```$', '', result)
+            result = result.strip()
+
+        try:
+            parsed = json.loads(result)
+            matched_name = parsed.get("matched_skill")
+            if not matched_name:
+                return None
+            for s in skills:
+                if s["name"] == matched_name:
+                    s["_extracted_params"] = parsed.get("extracted_params", {})
+                    return s
+        except (json.JSONDecodeError, ValueError):
+            self.out.warning("skill matching response unparseable")
+            return None
+
         return None
 
     def _load_skill(self, name: str) -> dict:
@@ -1399,34 +1448,40 @@ class AgentCLI:
 
         system_prompt = (
             "You are a task planner for a command-line agent. "
-            "Given a user task, available system tools, and directory context, "
+            "Given a user task, the currently linked tools, and directory context, "
             "produce a JSON object with a plan and a success condition.\n\n"
             "The plan is an array of steps, each with:\n"
             '  - "action": a SHORT verb-only description (e.g. "read_cpu", "list_dir", "clone_repo")\n'
-            '  - "tool": MUST be one of the available tools listed below. Do NOT invent tool names.\n'
+            '  - "tool": the best system command for the job. Prefer purpose-built tools '
+            '(e.g. "df" for disk space, "free" for memory, "git" for repos) over '
+            'reading raw files with cat/head. Any tool you name will be symlinked '
+            'automatically if it exists on PATH, so do NOT limit yourself to the '
+            'currently linked tools list — just pick the right tool for the task.\n'
             '  - "args": list of string arguments for that tool\n\n'
-            'The success_condition is a string describing what the tool output must contain '
-            'for the task to be considered done. Be specific. '
-            'Bad: "task completed successfully". '
-            'Good: "output contains the CPU model name and total memory in MB".\n\n'
+            'The success_condition must describe CONCRETE, DIRECTLY VERIFIABLE output. '
+            'It must specify exactly what facts or values the tool output must contain.\n'
+            'Bad: "output contains information about disk usage" — too vague, could be anything.\n'
+            'Bad: "output can be used to infer disk space" — inferential, not directly verifiable.\n'
+            'Good: "output contains filesystem mount points and their total/used/available space".\n'
+            'Good: "output contains the CPU model name and total memory in kB".\n\n'
             "Return ONLY valid JSON in this format:\n"
             '{\n'
             '  "plan": [{"action": "...", "tool": "...", "args": [...]}],\n'
             '  "success_condition": "..."\n'
             '}\n\n'
-            "IMPORTANT: The 'tool' field MUST be exactly one of the available tools. "
-            "Do NOT use the task description as a tool name. Do NOT invent new tool names. "
-            "If no available tool can accomplish the task, use the closest one with appropriate args.\n"
-            "For example, to read /proc/cpuinfo, use tool 'cat' with args ['/proc/cpuinfo']. "
-            "To list directory contents, use tool 'ls' with args ['-la']. "
-            "To read the first lines of a file, use tool 'head' with args ['-n', '20', '/path/to/file'].\n\n"
+            "Examples:\n"
+            "To check disk space, use tool 'df' with args ['-h'].\n"
+            "To read CPU info, use tool 'cat' with args ['/proc/cpuinfo'].\n"
+            "To list directory contents, use tool 'ls' with args ['-la'].\n"
+            "To check memory, use tool 'free' with args ['-h'].\n\n"
             "If a task changes system state (like creating a file), include a final step "
             "to output the result (e.g. ls or cat) so it can be verified."
         )
 
         user_prompt = (
             f"Task: {task}\n"
-            f"Available tools: {', '.join(sorted(tools))}\n"
+            f"Currently linked tools: {', '.join(sorted(tools))}\n"
+            "(You may request any system tool — it will be symlinked automatically.)\n"
             f"Current directory: {cwd}\n"
             f"Files: {', '.join(f.name for f in cwd.iterdir() if f.is_file())[:200]}\n"
             f"Dirs: {', '.join(d.name for d in cwd.iterdir() if d.is_dir())[:200]}"
@@ -1575,18 +1630,20 @@ class AgentCLI:
         # 3. Create plan + success condition via LLM
         self.out.section("plan")
         plan, success_condition = self._create_plan(task)
-        tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
         for i, step in enumerate(plan):
             tool = step.get("tool", "(none)")
             self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
         self.out.info(f"success condition: {success_condition}")
 
-        # 4. Validate plan
+        # 4. Validate plan (may rewrite tool names if alternatives are needed)
         self.out.section("validate")
         if not self._validate_plan(plan):
             self.out.fatal("validation failed")
             sys.exit(1)
         self.out.info("all steps valid")
+
+        # Compute tools_in_plan AFTER validation so rewritten names are captured
+        tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
 
         # 5. Execute — capture output
         self.out.section("execute")

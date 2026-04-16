@@ -7,15 +7,16 @@
 
 Openclaw is janky, insecure, doesn't get shit done, and costs too much skrilla. 
 
-**MAX AC** fixes that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd. 
+Turn to **MAX AC**: a single shot agent. No complex setups or servers. No key generation or weirdo configuration files. No sitting in memory or orchestrating through systemd. 
 
  * It can run locally on average laptops.
- * Everything is done in Anthropic skills. You can import them and export them.
- * You can use the skill as the harness giving you more deterministic results.
+ * Everything is done in Anthropic skills. Import them, export them, modify them.
+ * Command permissions are categorized and symlinked. 
+ * Specify the skill you want for deteministic results, or don't. Up to you.
 
-It does what you ask and then goes away. 
+MAX gets shit done and then gets out of the way. 
 
-This maxes **MAX AC** the coolest terminal agent.
+Use **MAX AC**, the coolest terminal agent.
 
 Watch it on a cheap $500 laptop using a local model, LFM 2.5:
 

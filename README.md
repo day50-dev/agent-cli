@@ -8,7 +8,7 @@ It can even run locally on average GPU poor laptops.
 
 It does what you ask and then goes away.
 
-It's the coolest terminal agent ever
+This maxes **MAX AC** the coolest terminal agent ever!
 
 Here it's on a $500 laptop using a local model, LFM 2.5:
 

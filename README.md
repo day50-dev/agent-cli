@@ -1,8 +1,8 @@
 # MAX AC 
 
-I watched a friend struggle with openclaw. It looks to be extremely complex and didn't work very well for him. 
+I watched a friend struggle with openclaw. It was extremely complicated for him and he didn't get it up and running.
 
-What I built is a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd.
+**MAX AC** fixed that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd.
 
 It does what you ask and then goes away.
 

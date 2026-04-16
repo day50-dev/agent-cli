@@ -30,9 +30,6 @@ ac -s base_url "http://localhost:11434/"
 ```bash
 # Run a one-shot task
 ac "list all files in the current directory"
-
-# No arguments → show current status (tools, skills, config)
-ac
 ```
 
 `maxac` is the full name; `ac` is the short alias.

@@ -3,7 +3,7 @@
 
 </p>
 
-Openclaw is complicated, insecure, doesn't get shit done and costs a bunch. Stop wasting time on that shit.
+Openclaw is complicated, insecure, doesn't get shit done and costs a bunch. Stop wasting time on busted claws.
 
 **MAX AC** fixes that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd. 
 

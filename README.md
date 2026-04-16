@@ -27,7 +27,7 @@ Every successful task is saved as a **skill** — an [Anthropic-compatible](http
     plan.json     # parameterized plan, params_map, success condition
 ```
 
-The LLM identifies variable arguments (URLs, repo names, paths, versions) and gives them semantic parameter names (e.g. `repository_url`, `branch_name`) — so the same skill works on new inputs without re-planning. Skill matching is also LLM-driven: the model decides whether a saved skill genuinely applies to your task, rejecting false matches like a generic `cat` skill when you asked about disk space.
+The LLM identifies variable arguments (URLs, repo names, paths, versions) and gives them semantic parameter names (e.g. `repository_url`, `branch_name`) — so the same skill works on new inputs without re-planning. Skill matching is also LLM-driven: the model decides whether a saved skill genuinely applies to your task, rejecting false matches.
 
 ---
 

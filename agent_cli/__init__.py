@@ -111,6 +111,8 @@ _ANSI_BLUE   = "\033[34m"
 
 def _md_escape(text: str) -> str:
     """Escape backtick characters for safe use inside markdown code spans."""
+    if text is None:
+        return ""
     return text.replace('`', r'\`')
 
 
@@ -218,7 +220,7 @@ class Output:
     def prompt(self, text: str, end: str = "\n") -> None:
         """User interaction prompt."""
         # Interactive prompts need direct stdout — don't render as markdown.
-        print(f"\n  ? {text}", end=end)
+        print(f"\n  {text}", end=end)
 
     def separator(self) -> None:
         """Horizontal rule separating major sections — shown at INFO level and above."""
@@ -559,7 +561,7 @@ class AgentCLI:
         if auto_yes:
             self.out.info(f"symlink  {name} → {path}  [{task}]")
         else:
-            self.out.prompt(f"Allow '{name}' ({path})?  category: [{task}]  (y/n): ", end="")
+            self.out.prompt(f"Allow '{name}' ({path}) [{task}] (y/n)? ", end="")
             resp = sys.stdin.readline().strip().lower()
             if resp != "y":
                 self.out.info("skipped")
@@ -1274,9 +1276,9 @@ class AgentCLI:
         key_masked = self.model_config["key"][:4] + "****" if self.model_config.get("key") else "(none)"
         self.out.markdown("### API Diagnostics\n")
         self.out.kv("url", url)
-        self.out.kv("model", self.model_config.get("model", "(none)"))
+        self.out.kv("model", self.model_config.get("model") or "(none)")
         self.out.kv("key", key_masked)
-        self.out.info(f"debug with: ac --curlify -m {self.model_config.get('model', '')} '<task>'")
+        self.out.info(f"debug with: ac --curlify -m {self.model_config.get('model') or ''} '<task>'")
 
     @staticmethod
     def _curlify(url: str, headers: dict, data: bytes) -> str:
@@ -1502,9 +1504,6 @@ class AgentCLI:
     # Main entry point
     # ------------------------------------------------------------------
     def execute_task(self, task: str):
-        self.out.headline(task)
-        self.out.separator()
-
         # 1. Check for applicable skills
         self.out.section("Skills")
         skill = self._find_applicable_skill(task)
@@ -1588,8 +1587,7 @@ class AgentCLI:
 
     def show_status(self):
         tools = self.get_all_symlinked_tools()
-        md = "# maxac\n\n"
-        md += "### Tools\n"
+        md = "### Tools\n"
         for task, names in sorted(tools.items()):
             md += f"- **{task}/bin/** {'  '.join(names)}\n"
         md += "\n"
@@ -1609,11 +1607,6 @@ class AgentCLI:
             md += f"- **{s['name']}**\n"
             if s.get("tools_used"):
                 md += f"  - uses: {', '.join(f'`{_md_escape(t)}`' for t in s['tools_used'])}\n"
-            count = s.get('success_count', 0)
-            if count > 0:
-                md += f"  - verified ({count}x)\n"
-            else:
-                md += f"  - unverified\n"
         return md
 
     def _print_skills(self):
@@ -1681,42 +1674,49 @@ def main():
     agent = AgentCLI(config_dir=args.config_dir, auto_yes=args.yes, verbose=args.verbose)
     agent._curlify_mode = args.curlify
 
-    # --set
-    if args.set is not None:
-        if len(args.set) == 0:
-            # Show current config values
-            agent.show_model_config()
-        elif len(args.set) == 2:
-            agent.set_model_config(args.set[0], args.set[1])
-            print(f"Set {args.set[0]} = {args.set[1]}")
-        else:
-            print("Usage: ac -s [KEY VALUE]")
-            print("  (no args)  show current values")
-            print("  KEY VALUE  set a value (model, base_url, key)")
-        return
-
-    # one-shot overrides
-    if args.model:
-        if args.model == "__list__":
-            agent.list_models()
+    try:
+        # --set
+        if args.set is not None:
+            if len(args.set) == 0:
+                # Show current config values
+                agent.show_model_config()
+            elif len(args.set) == 2:
+                agent.set_model_config(args.set[0], args.set[1])
+                print(f"Set {args.set[0]} = {args.set[1]}")
+            else:
+                print("Usage: ac -s [KEY VALUE]")
+                print("  (no args)  show current values")
+                print("  KEY VALUE  set a value (model, base_url, key)")
             return
-        agent.model_config["model"] = args.model
-    if args.base_url:
-        agent.model_config["base_url"] = args.base_url
-    if args.key:
-        agent.model_config["key"] = args.key
 
-    if args.task:
-        agent.execute_task(args.task)
-    elif args.skills:
-        if args.skills == "__all__":
-            agent._print_skills()
+        # one-shot overrides
+        if args.model:
+            if args.model == "__list__":
+                agent.list_models()
+                return
+            agent.model_config["model"] = args.model
+        if args.base_url:
+            agent.model_config["base_url"] = args.base_url
+        if args.key:
+            agent.model_config["key"] = args.key
+
+        if args.task:
+            agent.execute_task(args.task)
+        elif args.skills:
+            if args.skills == "__all__":
+                agent._print_skills()
+            else:
+                agent._print_skill_detail(args.skills)
+        elif args.delete:
+            agent.delete_skill(args.delete)
         else:
-            agent._print_skill_detail(args.skills)
-    elif args.delete:
-        agent.delete_skill(args.delete)
-    else:
-        agent.show_status()
+            parser.print_help()
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
+    except Exception as e:
+        agent.out.fatal(str(e))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

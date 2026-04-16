@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maxac"
-version = "0.1.0"
+version = "0.1.1"
 description = "A one-shot command-line helper with scoped execution tasks"
 readme = "README.md"
 requires-python = ">=3.8"

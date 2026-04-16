@@ -10,7 +10,7 @@ It does what you ask and then goes away.
 
 This maxes **MAX AC** the coolest terminal agent ever!
 
-Watch it on a $500 laptop using a local model, LFM 2.5:
+Watch it on a cheap $500 laptop using a local model, LFM 2.5:
 
 https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 

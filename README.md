@@ -101,6 +101,7 @@ ac -y "clone github.com/user/repo as my-repo"
 ac --skills                   # list all saved skills
 ac --skills clone-repo        # show detail: instructions, plan, params
 ac -d clone-repo              # delete a bad skill so it re-learns from scratch
+ac --skill name --task file   # explicitly run a skill with a task from a file
 ac --import path/to/skill     # import a skill from a dir, .md, or .skill archive
 ac --export skill-name        # export a skill to a .skill archive (zip)
 ```
@@ -181,6 +182,8 @@ ac --curlify "say hi"
 | `ac -k "key" "<task>"` | Run task with a different API key |
 | `ac --skills` | List saved skills |
 | `ac --skills <name>` | Show skill detail |
+| `ac --skill <name>` | Explicitly run a specific skill |
+| `ac --task <file>` | Read task description from a file |
 | `ac -d <name>` | Delete a skill |
 | `ac --import <path>` | Import a skill from a dir, .md, or .skill archive |
 | `ac --export <name>` | Export a skill to a .skill archive (zip) |

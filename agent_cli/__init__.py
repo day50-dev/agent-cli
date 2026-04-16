@@ -1040,6 +1040,123 @@ class AgentCLI:
         self.out.success(f"skill '{skill_name}' deleted")
         return True
 
+    def import_skill(self, input_path: str) -> bool:
+        """Import a skill from a directory, SKILL.md file, or .skill archive."""
+        path = Path(input_path).resolve()
+        if not path.exists():
+            self.out.fatal(f"import path '{input_path}' not found")
+            return False
+
+        # If it's a directory, assume it contains SKILL.md
+        if path.is_dir():
+            meta = self._parse_skill_md(path)
+            if not meta:
+                self.out.fatal(f"no SKILL.md with valid frontmatter found in '{input_path}'")
+                return False
+            skill_name = meta.get("name") or path.name
+            dest_dir = self.skills_dir / skill_name
+            if dest_dir.exists():
+                self.out.warning(f"skill '{skill_name}' already exists — overwriting")
+                shutil.rmtree(dest_dir)
+            shutil.copytree(path, dest_dir)
+            self.out.success(f"imported skill '{skill_name}' from directory")
+            return True
+
+        # If it's a file, check extension
+        if path.suffix == ".skill":
+            import zipfile
+            try:
+                with zipfile.ZipFile(path, 'r') as zipf:
+                    # Look for SKILL.md in the root of the zip
+                    # (The package_skill.py script adds 'arcname = file_path.relative_to(skill_path.parent)',
+                    # so the top-level directory is usually preserved inside the zip.)
+                    skill_md_name = None
+                    for name in zipf.namelist():
+                        if name.endswith("SKILL.md"):
+                            skill_md_name = name
+                            break
+                    if not skill_md_name:
+                        self.out.fatal((f"no SKILL.md found in '{input_path}'"))
+                        return False
+                    
+                    # Extract to a temp dir to parse name
+                    import tempfile
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        zipf.extractall(tmpdir)
+                        # Find the directory containing SKILL.md
+                        for root, dirs, files in os.walk(tmpdir):
+                            if "SKILL.md" in files:
+                                meta = self._parse_skill_md(Path(root))
+                                if meta:
+                                    skill_name = meta.get("name")
+                                    if skill_name:
+                                        dest_dir = self.skills_dir / skill_name
+                                        if dest_dir.exists():
+                                            self.out.warning(f"skill '{skill_name}' already exists — overwriting")
+                                            shutil.rmtree(dest_dir)
+                                        shutil.copytree(root, dest_dir)
+                                        self.out.success(f"imported skill '{skill_name}' from archive")
+                                        return True
+                self.out.fatal(f"archive '{input_path}' does not contain a valid skill")
+                return False
+            except Exception as e:
+                self.out.fatal(f"failed to extract skill from archive: {e}")
+                return False
+
+        # If it's just a SKILL.md file
+        if path.name == "SKILL.md" or path.suffix == ".md":
+            # Create a directory for it based on its internal name
+            # (Need a dummy dir to pass to _parse_skill_md)
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir) / "SKILL.md"
+                shutil.copy2(path, tmp_path)
+                meta = self._parse_skill_md(Path(tmpdir))
+                if not meta or not meta.get("name"):
+                    self.out.fatal(f"'{input_path}' has no 'name' in frontmatter")
+                    return False
+                skill_name = meta["name"]
+                dest_dir = self.skills_dir / skill_name
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dest_dir / "SKILL.md")
+                self.out.success(f"imported skill '{skill_name}' from Markdown file")
+                return True
+
+        self.out.fatal(f"don't know how to import '{input_path}' (expected dir, .md, or .skill)")
+        return False
+
+    def export_skill(self, skill_name: str, output_path: str = None) -> bool:
+        """Package a skill into a .skill archive (zip)."""
+        skill_dir = self._find_skill_dir(skill_name)
+        if not skill_dir:
+            self.out.fatal(f"skill '{skill_name}' not found")
+            return False
+
+        if output_path:
+            dest = Path(output_path).resolve()
+            if dest.is_dir():
+                dest = dest / f"{skill_name}.skill"
+            elif dest.suffix != ".skill":
+                dest = dest.with_suffix(".skill")
+        else:
+            dest = Path.cwd() / f"{skill_name}.skill"
+
+        import zipfile
+        try:
+            with zipfile.ZipFile(dest, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Store it under its own directory name in the zip
+                # to match how package_skill.py does it (so it has a root folder).
+                for file_path in skill_dir.rglob('*'):
+                    if not file_path.is_file():
+                        continue
+                    arcname = Path(skill_name) / file_path.relative_to(skill_dir)
+                    zipf.write(file_path, arcname)
+            self.out.success(f"exported skill '{skill_name}' to {dest.name}")
+            return True
+        except Exception as e:
+            self.out.fatal(f"failed to export skill '{skill_name}': {e}")
+            return False
+
     def apply_skill(self, skill_meta: dict) -> tuple[bool, str]:
         """Execute a saved skill's plan with parameter substitution.
 
@@ -1662,6 +1779,14 @@ def main():
         help="Delete a skill so it won't be used and must be re-learned",
     )
     parser.add_argument(
+        "--import", dest="import_path", metavar="PATH",
+        help="Import a skill from a directory, SKILL.md file, or .skill archive",
+    )
+    parser.add_argument(
+        "--export", nargs="+", metavar=("SKILL", "PATH"),
+        help="Export a skill to a .skill archive; if PATH is omitted, saves to current directory",
+    )
+    parser.add_argument(
         "--curlify", action="store_true",
         help="Print the curl equivalent of the model API call for debugging",
     )
@@ -1709,6 +1834,12 @@ def main():
                 agent._print_skill_detail(args.skills)
         elif args.delete:
             agent.delete_skill(args.delete)
+        elif args.import_path:
+            agent.import_skill(args.import_path)
+        elif args.export:
+            skill_name = args.export[0]
+            output_path = args.export[1] if len(args.export) > 1 else None
+            agent.export_skill(skill_name, output_path)
         else:
             parser.print_help()
     except KeyboardInterrupt:

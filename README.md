@@ -101,6 +101,8 @@ ac -y "clone github.com/user/repo as my-repo"
 ac --skills                   # list all saved skills
 ac --skills clone-repo        # show detail: instructions, plan, params
 ac -d clone-repo              # delete a bad skill so it re-learns from scratch
+ac --import path/to/skill     # import a skill from a dir, .md, or .skill archive
+ac --export skill-name        # export a skill to a .skill archive (zip)
 ```
 
 ---
@@ -180,6 +182,8 @@ ac --curlify "say hi"
 | `ac --skills` | List saved skills |
 | `ac --skills <name>` | Show skill detail |
 | `ac -d <name>` | Delete a skill |
+| `ac --import <path>` | Import a skill from a dir, .md, or .skill archive |
+| `ac --export <name>` | Export a skill to a .skill archive (zip) |
 | `ac -v "<task>"` | Show sections and steps (`-vv` for raw tool output) |
 | `ac -y "<task>"` | Auto-approve all tool symlinks |
 | `ac -c <path> "<task>"` | Use a different config directory |

@@ -1,9 +1,9 @@
-# agent-cli
+# maxac
 
 > Your terminal. Any task. One command.
 
 ```bash
-ta "how much disk space do I have remaining"
+ac "how much disk space do I have remaining"
 ```
 
 You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust to the variance that breaks classical heuristics. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
@@ -35,7 +35,7 @@ ac "list all files in the current directory"
 ac
 ```
 
-`ac` and `agent-cli` are interchangeable — `ac` is the short alias.
+`maxac` is the full name; `ac` is the short alias.
 
 ---
 
@@ -56,7 +56,7 @@ ac
 Instead of reaching into your full system `PATH`, `ac` works with a minimal set of symlinked tools under its config directory:
 
 ```
-~/.local/agent-cli/tools/
+~/.local/maxac/tools/
   doc/bin/    whatis  apropos  man  pydoc
   find/bin/   cat  head  tail  ls
   vcs/bin/    git          ← symlinked on first use, after you say yes
@@ -82,7 +82,7 @@ ac -y "clone github.com/user/repo as my-repo"
 Every successful task is saved as a **skill** — an [Anthropic-compatible](https://agentskills.io) `SKILL.md` + `plan.json` pair under your config directory:
 
 ```
-~/.local/agent-cli/skills/
+~/.local/maxac/skills/
   clone-repo/
     SKILL.md      # YAML frontmatter + instructions (importable to other tools)
     plan.json     # parameterized plan, params_map, success condition
@@ -102,7 +102,7 @@ ac -d clone-repo              # delete a bad skill so it re-learns from scratch
 
 ## Configuration
 
-Config lives at `~/.local/agent-cli/config.json` (path varies by platform — see table below).
+Config lives at `~/.local/maxac/config.json` (path varies by platform — see table below).
 
 ### Set values
 
@@ -151,9 +151,9 @@ ac --curlify "say hi"
 
 | Platform | Default path |
 |---|---|
-| Linux | `~/.local/agent-cli/` |
-| macOS (framework build) | `~/Library/Python/3.x/agent-cli/` |
-| macOS (non-framework) | `~/.local/agent-cli/` |
+| Linux | `~/.local/maxac/` |
+| macOS (framework build) | `~/Library/Python/3.x/maxac/` |
+| macOS (non-framework) | `~/.local/maxac/` |
 | Override | `-c <path>` / `--config-dir <path>` |
 
 ---

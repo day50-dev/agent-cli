@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-agent-cli: A one-shot command-line helper with scoped execution tasks.
+maxac: A one-shot command-line helper with scoped execution tasks.
 
 The agent starts with a minimal tool set and uses those tools (whatis, apropos,
 man, pydoc, cat, head, tail, ls) to discover what else is available on the system.
-Tools are always observable symlinks in .config/agent-cli/tools/{task}/bin.
+Tools are always observable symlinks in .config/maxac/tools/{task}/bin.
 
 Agent flow:
 1. Analyze context and define success condition
@@ -33,7 +33,7 @@ import yaml
 # Default configuration — lives under site.USER_BASE (~/.local on Linux,
 # ~/Library/Python/<ver> on macOS) so it's always in a stable user location,
 # not relative to the current working directory.
-DEFAULT_CONFIG_DIR = Path(site.USER_BASE) / "agent-cli"
+DEFAULT_CONFIG_DIR = Path(site.USER_BASE) / "maxac"
 DEFAULT_TOOLS_DIR = DEFAULT_CONFIG_DIR / "tools"
 DEFAULT_SKILLS_DIR = DEFAULT_CONFIG_DIR / "skills"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
@@ -312,7 +312,7 @@ class Spinner:
 
 
 class AgentCLI:
-    """Main agent-cli class."""
+    """Main maxac class."""
 
     def __init__(self, config_dir: Optional[Path] = None, auto_yes: bool = False,
                  verbose: int = 0):
@@ -1588,7 +1588,7 @@ class AgentCLI:
 
     def show_status(self):
         tools = self.get_all_symlinked_tools()
-        md = "# agent-cli\n\n"
+        md = "# maxac\n\n"
         md += "### Tools\n"
         for task, names in sorted(tools.items()):
             md += f"- **{task}/bin/** {'  '.join(names)}\n"
@@ -1641,7 +1641,7 @@ class AgentCLI:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="agent-cli: A one-shot command-line helper "
+        description="maxac: A one-shot command-line helper "
                     "with scoped execution tasks and observable tool symlinks."
     )
     parser.add_argument("task", nargs="?", help="Task description to execute")
@@ -1654,7 +1654,7 @@ def main():
     parser.add_argument("-k", "--key", help="Override API key for this run")
     parser.add_argument(
         "-c", "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
-        help="Config directory (default: .local/agent-cli)",
+        help="Config directory (default: .local/maxac)",
     )
     parser.add_argument(
         "-y", "--yes", action="store_true",

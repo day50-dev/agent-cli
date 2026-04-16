@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "agent-cli contributors"},
+    {name = "maxac contributors"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -28,11 +28,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/day50/agent-cli"
+Homepage = "https://github.com/day50/maxac"
 
 [project.scripts]
-term-agent = "agent_cli:main"
-ta = "agent_cli:main"
+maxac = "agent_cli:main"
+ac = "agent_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_cli*"]

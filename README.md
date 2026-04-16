@@ -4,7 +4,7 @@ The coolest terminal agent ever
 
 **Running Locally** or in the cloud...
 
-here it is running off of $500 laptop.
+Here it's running off a $500 laptop using a local model, LFM 2.5:
 
 https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 

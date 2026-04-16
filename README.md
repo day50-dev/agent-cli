@@ -1,6 +1,8 @@
 # MAX AC 
 
-> The coolest terminal agent ever
+The coolest terminal agent ever
+
+**Running Locally** or in the cloud...
 
 https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 

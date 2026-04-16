@@ -1,6 +1,9 @@
-# MAX AC 
+<p align="center">
+<img width="750" height="256" alt="logo_750" src="https://github.com/user-attachments/assets/be17868c-417f-45b4-8804-9da8f812e1c3" />
 
-I watched a friend struggle with openclaw. It was too complicated for him. He didn't get it up and running.
+</p>
+
+Openclaw is complicated, insecure, doesn't get shit done and costs a bunch. Stop wasting time on that shit.
 
 **MAX AC** fixes that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd. 
 

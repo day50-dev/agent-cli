@@ -1,6 +1,12 @@
 # MAX AC 
 
-The coolest terminal agent ever
+I watched a friend struggle with openclaw. It looks to be extremely complex and didn't work very well for him. 
+
+What I built is a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd.
+
+It does what you ask and then goes away.
+
+I think it's the coolest terminal agent ever
 
 **Running Locally** or in the cloud...
 

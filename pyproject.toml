@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentcli"
+name = "term-agent"
 version = "0.1.0"
 description = "A one-shot command-line helper with scoped execution tasks"
 readme = "README.md"
@@ -31,8 +31,8 @@ dependencies = [
 Homepage = "https://github.com/day50/agent-cli"
 
 [project.scripts]
-agent-cli = "agent_cli:main"
-ac = "agent_cli:main"
+term-agent = "agent_cli:main"
+ta = "agent_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_cli*"]

@@ -3,7 +3,7 @@
 > Your terminal. Any task. One command.
 
 ```bash
-ac "how much disk space do I have remaining"
+ta "how much disk space do I have remaining"
 ```
 
 You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust to the variance that breaks classical heuristics. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
@@ -13,14 +13,14 @@ You describe what you want. `ac` uses LLM intelligence where it matters — skil
 ## Install
 
 ```bash
-uvx/pipx/uv tool agentcli
+uvx/pipx/uv tool term-agent
 ```
 
-Then point it at any OpenAI-compatible API:
+Then point it at any OpenAI-compatible API and ask you TA:
 
 ```bash
-ac -s model "gemma4:9b"
-ac -s base_url "http://localhost:11434/"
+ta -s model "gemma4:9b"
+ta -s base_url "http://localhost:11434/"
 ```
 
 ---
@@ -29,7 +29,7 @@ ac -s base_url "http://localhost:11434/"
 
 ```bash
 # Run a one-shot task
-ac "list all files in the current directory"
+ta "list all files in the current directory"
 
 # No arguments → show current status (tools, skills, config)
 ac
@@ -72,7 +72,7 @@ When a task needs a new tool, the agent checks PATH first, then asks the LLM for
 Use `-y` / `--yes` to pre-approve all symlinks for non-interactive runs:
 
 ```bash
-ac -y "clone github.com/user/repo as my-repo"
+ta -y "clone github.com/user/repo as my-repo"
 ```
 
 ---
@@ -93,9 +93,9 @@ The LLM identifies variable arguments (URLs, repo names, paths, versions) and gi
 ### Skill commands
 
 ```bash
-ac --skills                   # list all saved skills
-ac --skills clone-repo        # show detail: instructions, plan, params
-ac -d clone-repo              # delete a bad skill so it re-learns from scratch
+ta --skills                   # list all saved skills
+ta --skills clone-repo        # show detail: instructions, plan, params
+ta -d clone-repo              # delete a bad skill so it re-learns from scratch
 ```
 
 ---
@@ -107,16 +107,16 @@ Config lives at `~/.local/agent-cli/config.json` (path varies by platform — se
 ### Set values
 
 ```bash
-ac -s model "gpt-4o"
-ac -s base_url "https://api.openai.com/v1"
-ac -s key "sk-..."
-ac -s                          # show current values (key is masked)
+ta -s model "gpt-4o"
+ta -s base_url "https://api.openai.com/v1"
+ta -s key "sk-..."
+ta -s                          # show current values (key is masked)
 ```
 
 `base_url` is auto-corrected — if it doesn't already end with `/v1` or `/v1beta`, `/v1` is appended:
 
 ```bash
-ac -s base_url "https://integrate.api.nvidia.com"
+ta -s base_url "https://integrate.api.nvidia.com"
 # → stored as https://integrate.api.nvidia.com/v1
 ```
 
@@ -125,7 +125,7 @@ ac -s base_url "https://integrate.api.nvidia.com"
 Run `-m` with no value to query the `/models` endpoint — useful for verifying your key and `base_url`:
 
 ```bash
-ac -m
+ta -m
 #   ✓ models available at https://api.openai.com/v1:
 #   · gpt-4o  (openai)
 #   · gpt-4o-mini  (openai)
@@ -136,14 +136,14 @@ ac -m
 Override model, base URL, or key for a single run without changing saved config:
 
 ```bash
-ac -m "gpt-4o-mini" "summarise this repo in 10 bullets"
-ac -b "https://my-proxy.example.com/v1" -k "sk-..." "list all files"
+ta -m "gpt-4o-mini" "summarise this repo in 10 bullets"
+ta -b "https://my-proxy.example.com/v1" -k "sk-..." "list all files"
 ```
 
 ### Debug: see the raw API call
 
 ```bash
-ac --curlify "say hi"
+ta --curlify "say hi"
 # prints the equivalent curl command before executing
 ```
 
@@ -162,23 +162,23 @@ ac --curlify "say hi"
 
 | Command | What it does |
 |---|---|
-| `ac "<task>"` | Run a one-shot task |
+| `ta "<task>"` | Run a one-shot task |
 | `ac` | Show status (tools, skills, config) |
-| `ac -s model "gpt-4o"` | Set default model |
-| `ac -s base_url "…"` | Set default API base URL |
-| `ac -s key "…"` | Set default API key |
-| `ac -s` | Show current config values |
-| `ac -m` | List models at current base URL |
-| `ac -m "model" "<task>"` | Run task with a different model |
-| `ac -b "url" "<task>"` | Run task with a different base URL |
-| `ac -k "key" "<task>"` | Run task with a different API key |
-| `ac --skills` | List saved skills |
-| `ac --skills <name>` | Show skill detail |
-| `ac -d <name>` | Delete a skill |
-| `ac -v "<task>"` | Show sections and steps (`-vv` for raw tool output) |
-| `ac -y "<task>"` | Auto-approve all tool symlinks |
-| `ac -c <path> "<task>"` | Use a different config directory |
-| `ac --curlify "<task>"` | Print the raw API call as curl |
+| `ta -s model "gpt-4o"` | Set default model |
+| `ta -s base_url "…"` | Set default API base URL |
+| `ta -s key "…"` | Set default API key |
+| `ta -s` | Show current config values |
+| `ta -m` | List models at current base URL |
+| `ta -m "model" "<task>"` | Run task with a different model |
+| `ta -b "url" "<task>"` | Run task with a different base URL |
+| `ta -k "key" "<task>"` | Run task with a different API key |
+| `ta --skills` | List saved skills |
+| `ta --skills <name>` | Show skill detail |
+| `ta -d <name>` | Delete a skill |
+| `ta -v "<task>"` | Show sections and steps (`-vv` for raw tool output) |
+| `ta -y "<task>"` | Auto-approve all tool symlinks |
+| `ta -c <path> "<task>"` | Use a different config directory |
+| `ta --curlify "<task>"` | Print the raw API call as curl |
 
 ---
 

@@ -6,7 +6,7 @@
 ac "how much disk space do I have remaining"
 ```
 
-You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust to the variance that breaks classical heuristics. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
+You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
 
 ---
 

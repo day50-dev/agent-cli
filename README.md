@@ -16,7 +16,7 @@ You describe what you want. `ac` uses LLM intelligence where it matters — skil
 uvx/pipx/uv tool maxac
 ```
 
-Then point it at any OpenAI-compatible API and ask you TA:
+Then point it at any OpenAI-compatible API and turn up the AC:
 
 ```bash
 ac -s model "gemma4:9b"

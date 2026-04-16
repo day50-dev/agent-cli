@@ -1,6 +1,6 @@
-# maxac
+# MAX AC 
 
-> Your terminal. Any task. One command.
+> The coolest terminal agent ever
 
 ```bash
 ac "how much disk space do I have remaining"

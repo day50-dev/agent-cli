@@ -16,6 +16,19 @@ https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 
 You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
 
+## Skills
+
+Every successful task is saved as a **skill** — an [Anthropic-compatible](https://agentskills.io) `SKILL.md` + `plan.json` pair under your config directory:
+
+```
+~/.local/maxac/skills/
+  clone-repo/
+    SKILL.md      # YAML frontmatter + instructions (importable to other tools)
+    plan.json     # parameterized plan, params_map, success condition
+```
+
+The LLM identifies variable arguments (URLs, repo names, paths, versions) and gives them semantic parameter names (e.g. `repository_url`, `branch_name`) — so the same skill works on new inputs without re-planning. Skill matching is also LLM-driven: the model decides whether a saved skill genuinely applies to your task, rejecting false matches like a generic `cat` skill when you asked about disk space.
+
 ---
 
 ## Install
@@ -71,7 +84,7 @@ Instead of reaching into your full system `PATH`, `ac` works with a minimal set 
 When a task needs a new tool, the agent checks PATH first, then asks the LLM for an alternative if needed, then falls back to `whatis`/`apropos` as a last resort. It prompts you before symlinking:
 
 ```
-  ? allow symlink: git → tools/vcs/bin/git  [y/N]
+  allow symlink: git → tools/vcs/bin/git  [y/N]
 ```
 
 Use `-y` / `--yes` to pre-approve all symlinks for non-interactive runs:
@@ -81,19 +94,6 @@ ac -y "clone github.com/user/repo as my-repo"
 ```
 
 ---
-
-## Skills
-
-Every successful task is saved as a **skill** — an [Anthropic-compatible](https://agentskills.io) `SKILL.md` + `plan.json` pair under your config directory:
-
-```
-~/.local/maxac/skills/
-  clone-repo/
-    SKILL.md      # YAML frontmatter + instructions (importable to other tools)
-    plan.json     # parameterized plan, params_map, success condition
-```
-
-The LLM identifies variable arguments (URLs, repo names, paths, versions) and gives them semantic parameter names (e.g. `repository_url`, `branch_name`) — so the same skill works on new inputs without re-planning. Skill matching is also LLM-driven: the model decides whether a saved skill genuinely applies to your task, rejecting false matches like a generic `cat` skill when you asked about disk space.
 
 ### Skill commands
 

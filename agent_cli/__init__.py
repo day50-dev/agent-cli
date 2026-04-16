@@ -1157,24 +1157,52 @@ class AgentCLI:
             self.out.fatal(f"failed to export skill '{skill_name}': {e}")
             return False
 
-    def apply_skill(self, skill_meta: dict) -> tuple[bool, str]:
+    def apply_skill(self, skill_meta: dict, task: str = None) -> tuple[bool, str]:
         """Execute a saved skill's plan with parameter substitution.
 
         Extracts parameter values from the current task (stored in
         skill_meta["_extracted_params"] by _find_applicable_skill), substitutes
         them into the parameterized plan, then executes.
 
+        If no plan exists (e.g. for a newly imported skill), a new plan is
+        generated using the skill's instructions as context.
+
         Returns (success, captured_output).
         """
         # Load full skill data from file
         full = self._load_skill(skill_meta["name"])
         if not full:
-            self.out.info(f"skill file not found for '{skill_meta['name']}'")
-            return False, ""
+            # Fallback for just-imported skills that only have metadata
+            full = skill_meta
 
         plan = full.get("plan", [])
+        
+        # If no plan exists, and we have a task, try to create one
+        if not plan and task:
+            self.out.info(f"generating plan for skill '{skill_meta['name']}'...")
+            # Include skill instructions in the task context
+            skill_dir = self._find_skill_dir(skill_meta["name"])
+            context = task
+            if skill_dir:
+                skill_md = skill_dir / "SKILL.md"
+                if skill_md.exists():
+                    context = f"Skill Instructions:\n{skill_md.read_text()}\n\nUser Task: {task}"
+            
+            plan, success_condition = self._create_plan(context)
+            if not plan:
+                return False, ""
+            
+            # Validate plan
+            if not self._validate_plan(plan):
+                return False, ""
+            
+            # If this is a newly generated plan, we don't need parameter substitution
+            # because it was generated for this specific task.
+            self.out.section("executing")
+            return self._execute_plan(plan, task)
+
         if not plan:
-            self.out.info("skill has no saved plan")
+            self.out.info("skill has no saved plan and no task provided to generate one")
             return False, ""
 
         # Reject skills where no step actually does anything
@@ -1620,17 +1648,31 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    def execute_task(self, task: str):
+    def execute_task(self, task: str, explicit_skill: str = None):
         # 1. Check for applicable skills
         self.out.section("Skills")
-        skill = self._find_applicable_skill(task)
+        skill = None
+        if explicit_skill:
+            skill_dir = self._find_skill_dir(explicit_skill)
+            if not skill_dir:
+                self.out.fatal(f"explicit skill '{explicit_skill}' not found")
+                sys.exit(1)
+            meta = self._parse_skill_md(skill_dir)
+            if not meta:
+                self.out.fatal(f"explicit skill '{explicit_skill}' missing SKILL.md metadata")
+                sys.exit(1)
+            skill = meta
+            self.out.info(f"using explicit skill: {skill['name']}")
+        else:
+            skill = self._find_applicable_skill(task)
+            if skill:
+                self.out.info(f"skill match: {skill['name']}")
+
         skill_success_condition = None
         if skill:
-            self.out.info(f"skill match: {skill['name']}")
-
             # 2. Apply skill — capture output for verification
             self.out.section("Applying")
-            ok, captured = self.apply_skill(skill)
+            ok, captured = self.apply_skill(skill, task=task)
             if ok:
                 # Load the skill's saved success condition for verification
                 full_skill = self._load_skill(skill['name'])
@@ -1657,6 +1699,12 @@ class AgentCLI:
                     self.out.separator()
                     self.out.info(f"skill completed: {skill['name']}")
                     return
+            
+            if explicit_skill:
+                # If explicit skill fails verification, we stop here.
+                self.out.fatal(f"explicit skill '{explicit_skill}' failed verification")
+                sys.exit(1)
+
             self.out.warning("skill did not satisfy — falling back to plan")
         else:
             self.out.info("none found")
@@ -1775,6 +1823,14 @@ def main():
         help="List skills, or show detail for a specific skill",
     )
     parser.add_argument(
+        "--skill", metavar="NAME",
+        help="Explicitly use a specific skill by name, skipping inference",
+    )
+    parser.add_argument(
+        "--task", dest="task_file", metavar="FILE",
+        help="Read the task description from a file",
+    )
+    parser.add_argument(
         "-d", "--delete", metavar="SKILL",
         help="Delete a skill so it won't be used and must be re-learned",
     )
@@ -1825,8 +1881,17 @@ def main():
         if args.key:
             agent.model_config["key"] = args.key
 
-        if args.task:
-            agent.execute_task(args.task)
+        # resolve task
+        task = args.task
+        if args.task_file:
+            path = Path(args.task_file).resolve()
+            if not path.exists():
+                print(f"Error: task file '{args.task_file}' not found")
+                sys.exit(1)
+            task = path.read_text().strip()
+
+        if task:
+            agent.execute_task(task, explicit_skill=args.skill)
         elif args.skills:
             if args.skills == "__all__":
                 agent._print_skills()

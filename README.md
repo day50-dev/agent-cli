@@ -2,15 +2,15 @@
 
 I watched a friend struggle with openclaw. It was too complicated for him and he didn't get it up and running.
 
-**MAX AC** fixed that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd.
+**MAX AC** fixes that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd. 
+
+It can run locally and succeed. Even on average GPU poor laptops.
 
 It does what you ask and then goes away.
 
-I think it's the coolest terminal agent ever
+It's the coolest terminal agent ever
 
-**Running Locally** or in the cloud...
-
-Here it's running off a $500 laptop using a local model, LFM 2.5:
+Here it's on a $500 laptop using a local model, LFM 2.5:
 
 https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 

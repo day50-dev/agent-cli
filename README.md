@@ -1,6 +1,6 @@
 # MAX AC 
 
-I watched a friend struggle with openclaw. It was too complicated for him and he didn't get it up and running.
+I watched a friend struggle with openclaw. It was too complicated for him. He didn't get it up and running.
 
 **MAX AC** fixes that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd. 
 

@@ -7,7 +7,7 @@
 
 Openclaw is janky, insecure, doesn't get shit done, and costs too much skrilla. 
 
-Turn to **MAX AC**: a single shot agent. No complex setups or servers. No key generation or weirdo configuration files. No sitting in memory or orchestrating through systemd. 
+Turn to **MAX AC**: a single shot agent. No complex setups or servers. No key generation or weirdo config files. No sitting in memory or orchestrating through systemd. 
 
  * It can run locally on average laptops.
  * Everything is done in Anthropic skills. Import them, export them, modify them.

@@ -45,6 +45,7 @@ except ImportError:
 DEFAULT_CONFIG_DIR = Path(site.USER_BASE) / "maxac"
 DEFAULT_TOOLS_DIR = DEFAULT_CONFIG_DIR / "tools"
 DEFAULT_SKILLS_DIR = DEFAULT_CONFIG_DIR / "skills"
+DEFAULT_TASKS_DIR = DEFAULT_CONFIG_DIR / "tasks"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 
 # Minimal default tools by task category
@@ -331,6 +332,7 @@ class AgentCLI:
         self.auto_yes = auto_yes
         self.tools_dir = self.config_dir / "tools"
         self.skills_dir = self.config_dir / "skills"
+        self.tasks_dir = self.config_dir / "tasks"
         self.config_file = self.config_dir / "config.json"
         self.mcp_file = mcp_file or (self.config_dir / "mcp_servers.json")
 
@@ -392,6 +394,7 @@ class AgentCLI:
     def _setup_directories(self):
         self.tools_dir.mkdir(parents=True, exist_ok=True)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
+        self.tasks_dir.mkdir(parents=True, exist_ok=True)
 
     def _setup_default_tools(self):
         """Create symlinks for the minimal default tool set."""
@@ -556,9 +559,10 @@ class AgentCLI:
 
         Resolution order:
           1. Already symlinked → return as-is
-          2. On PATH → symlink and return as-is
-          3. Ask the LLM for an alternative → if suggested tool is on PATH, use that
-          4. Fall back to apropos/whatis system search (RAG)
+          2. Found in tasks/ directory → return as-is (Task Tool)
+          3. On PATH → symlink and return as-is
+          4. Ask the LLM for an alternative → if suggested tool is on PATH, use that
+          5. Fall back to apropos/whatis system search (RAG)
 
         Returns the resolved tool name (may differ from *tool* if the LLM
         suggested an alternative), or None if unresolvable.
@@ -567,7 +571,14 @@ class AgentCLI:
         if tool in self.all_tool_names():
             return tool
 
-        # 2. On PATH — just symlink it
+        # 2. Found in tasks/ directory (Task Tool)
+        if (self.tasks_dir / tool).exists():
+            return tool
+        for ext in [".sh", ".py", ".bash", ".txt"]:
+            if (self.tasks_dir / f"{tool}{ext}").exists():
+                return f"{tool}{ext}"
+
+        # 3. On PATH — just symlink it
         if shutil.which(tool):
             if self.symlink_tool(tool, auto_yes=self.auto_yes):
                 return tool
@@ -1130,6 +1141,32 @@ class AgentCLI:
         self.out.success(f"skill '{skill_name}' deleted")
         return True
 
+    def edit_task(self, task_name: str) -> bool:
+        """Open a task script in the user's default editor."""
+        # Find the task file (could have various extensions: .sh, .py, .txt, etc.)
+        task_path = None
+        if (self.tasks_dir / task_name).exists():
+            task_path = self.tasks_dir / task_name
+        else:
+            # Try with common extensions
+            for ext in [".sh", ".py", ".bash", ".txt"]:
+                candidate = self.tasks_dir / f"{task_name}{ext}"
+                if candidate.exists():
+                    task_path = candidate
+                    break
+        
+        if not task_path:
+            self.out.fatal(f"task script '{task_name}' not found in {self.tasks_dir}")
+            return False
+
+        editor = os.environ.get('EDITOR', 'vi')
+        try:
+            subprocess.run([editor, str(task_path)])
+            return True
+        except Exception as e:
+            self.out.fatal(f"failed to open editor: {e}")
+            return False
+
     def import_skill(self, input_path: str) -> bool:
         """Import a skill from a directory, SKILL.md file, or .skill archive."""
         path = Path(input_path).resolve()
@@ -1611,11 +1648,18 @@ class AgentCLI:
             "produce a JSON object with a plan and a success condition.\n\n"
             "The plan is an array of steps, each with:\n"
             '  - "action": a SHORT verb-only description (e.g. "read_cpu", "list_dir", "clone_repo")\n'
-            '  - "tool": the best system command or MCP tool for the job. Prefer purpose-built tools '
+            '  - "tool": the best system command, MCP tool, or a NEW SCRIPT you create for the job. Prefer purpose-built tools '
             '(e.g. "df" for disk space, "free" for memory, "git" for repos) over '
             'reading raw files with cat/head. Any system tool you name will be symlinked '
             'automatically if it exists on PATH.\n'
             '  - "args": list of string arguments for system tools, or a dictionary of arguments for MCP tools\n\n'
+            "EXTENSION & TOOL CREATION:\n"
+            "If a standard system tool is likely to be brittle or insufficient for a modern requirement "
+            "(e.g., using 'curl' for a modern JS-heavy website is almost always the WRONG choice), "
+            "you SHOULD propose creating a dedicated high-level script in the 'tasks/' directory. "
+            "Use 'cat' to write the script (e.g., a Python script using 'lightpanda' or 'markitdown'). "
+            "This script then becomes a reusable 'Task Tool' that you can call in subsequent steps. "
+            "This makes your capabilities explicit and easy for the user to refine later.\n\n"
             'The success_condition must describe CONCRETE, DIRECTLY VERIFIABLE output. '
             'It must specify exactly what facts or values the tool output must contain.\n'
             'Bad: "output contains information about disk usage" — too vague, could be anything.\n'
@@ -1728,7 +1772,26 @@ class AgentCLI:
             args = step.get("args", [])
 
             if tool:
-                if tool in self.mcp_tools:
+                task_path = self.tasks_dir / tool
+                if task_path.exists():
+                    # Call Task Tool (saved script)
+                    self.out.info(f"calling Task script: {tool}")
+                    # Ensure executable
+                    if os.name != 'nt':
+                        mode = os.stat(task_path).st_mode
+                        os.chmod(task_path, mode | 0o111)
+                    
+                    cmd = [str(task_path)] + args if isinstance(args, list) else [str(task_path)]
+                    try:
+                        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                        out = r.stdout + r.stderr
+                        for line in out.strip().splitlines():
+                            self.out.output(line)
+                        captured.append(out.strip())
+                    except Exception as e:
+                        self.out.fatal(f"failed to run Task script '{tool}': {e}")
+                        return False, ""
+                elif tool in self.mcp_tools:
                     # Call MCP tool
                     if not isinstance(args, dict):
                         # If the LLM still provided a list for an MCP tool, we might need to handle it
@@ -1872,10 +1935,29 @@ class AgentCLI:
             md += f"- **{task}/bin/** {'  '.join(names)}\n"
         md += "\n"
         md += self._mcp_status_markdown()
+        md += self._tasks_markdown()
         md += self._skills_markdown()
         md += "\n---\n\n"
-        md += "* `ac '<task>'`\n* `ac --skills [name]`\n* `ac -d <skill>`\n* `ac -s model 'model-name'`\n"
+        md += "* `ac '<task description>'` (execute one-shot)\n"
+        md += "* `ac <saved-task>` (run saved task script)\n"
+        md += "* `ac -t <task-file>` (read task from file)\n"
+        md += "* `ac -e <task-name>` (edit task script)\n"
+        md += "* `ac -l` (list Anthropic skills)\n"
         self.out.markdown(md)
+
+    def _tasks_markdown(self) -> str:
+        """Build a markdown tasks (scripts) section string."""
+        if not self.tasks_dir.exists():
+            return ""
+        tasks = sorted([f.name for f in self.tasks_dir.iterdir() if f.is_file()])
+        md = "### Tasks (Scripts)\n"
+        if not tasks:
+            md += "*none yet — save tools or scripts to ~/local/maxac/tasks*\n"
+        else:
+            for t in tasks:
+                md += f"- **{t}**\n"
+        md += "\n"
+        return md
 
     def _mcp_status_markdown(self) -> str:
         """Build a markdown MCP servers section string."""
@@ -1900,7 +1982,7 @@ class AgentCLI:
     def _skills_markdown(self) -> str:
         """Build a markdown skills section string."""
         skills = self.get_available_skills()
-        md = "### Skills\n"
+        md = "### Skills (Anthropic)\n"
         if not skills:
             md += "*none yet — they are saved automatically on success*\n"
             return md
@@ -1911,7 +1993,7 @@ class AgentCLI:
         return md
 
     def _print_skills(self):
-        """Print a formatted list of skills."""
+        """Print a formatted list of Anthropic skills."""
         self.out.markdown(self._skills_markdown())
 
     def _print_skill_detail(self, skill_name: str):
@@ -1936,59 +2018,79 @@ class AgentCLI:
 def main():
     parser = argparse.ArgumentParser(
         description="maxac: A one-shot command-line helper "
-                    "with scoped execution tasks and observable tool symlinks."
+                    "with scoped execution tasks and observable tool symlinks.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"Default paths:\n"
+               f"  Config directory: {DEFAULT_CONFIG_DIR}\n"
+               f"  MCP servers:      {DEFAULT_CONFIG_DIR / 'mcp_servers.json'}\n"
     )
-    parser.add_argument("task", nargs="?", help="Task description to execute")
-    parser.add_argument(
-        "-s", "--set", nargs="*", metavar=("KEY", "VALUE"),
-        help="Set a model config value (model, base_url, key), or show current values with no args",
+    
+    # Task Execution & Pipelines
+    task_group = parser.add_argument_group("Task Execution & Pipelines")
+    task_group.add_argument("task", nargs="?", help="Task description or saved task name to execute")
+    task_group.add_argument(
+        "-t", "--task", dest="task_file", metavar="FILE",
+        help="Read the task description from a file",
     )
-    parser.add_argument("-m", "--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
-    parser.add_argument("-b", "--base-url", help="Override base_url for this run")
-    parser.add_argument("-k", "--key", help="Override API key for this run")
-    parser.add_argument(
-        "-c", "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
-        help=f"Config directory (default: {DEFAULT_CONFIG_DIR})",
+    task_group.add_argument(
+        "-e", "--edit", metavar="TASK",
+        help="Edit a saved Task script (shell/python) in your default editor",
     )
-    parser.add_argument(
+    task_group.add_argument(
         "-y", "--yes", action="store_true",
         help="Auto-approve tool symlinks (non-interactive mode)",
     )
-    parser.add_argument(
-        "-l", "--skills", nargs="?", const="__all__", metavar="SKILL",
-        help="List skills, or show detail for a specific skill",
+    task_group.add_argument(
+        "-v", "--verbose", action="count", default=0,
+        help="Increase verbosity: -v shows sections/steps, -vv shows all tool output",
     )
-    parser.add_argument(
-        "--skill", metavar="NAME",
-        help="Explicitly use a specific skill by name, skipping inference",
+
+    # Model Configuration
+    model_group = parser.add_argument_group("Model Configuration")
+    model_group.add_argument(
+        "-s", "--set", nargs="*", metavar=("KEY", "VALUE"),
+        help="Set a model config value (model, base_url, key), or show current values with no args",
     )
-    parser.add_argument(
-        "--task", dest="task_file", metavar="FILE",
-        help="Read the task description from a file",
-    )
-    parser.add_argument(
-        "-d", "--delete", metavar="SKILL",
-        help="Delete a skill so it won't be used and must be re-learned",
-    )
-    parser.add_argument(
-        "--import", dest="import_path", metavar="PATH",
-        help="Import a skill from a directory, SKILL.md file, or .skill archive",
-    )
-    parser.add_argument(
-        "--export", nargs="+", metavar=("SKILL", "PATH"),
-        help="Export a skill to a .skill archive; if PATH is omitted, saves to current directory",
-    )
-    parser.add_argument(
+    model_group.add_argument("-m", "--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
+    model_group.add_argument("-b", "--base-url", help="Override base_url for this run")
+    model_group.add_argument("-k", "--key", help="Override API key for this run")
+    model_group.add_argument(
         "--curlify", action="store_true",
         help="Print the curl equivalent of the model API call for debugging",
     )
-    parser.add_argument(
-        "--mcp_file", type=Path,
-        help=f"Path to MCP servers config file (default: {DEFAULT_CONFIG_DIR / 'mcp_servers.json'})",
+
+    # Agent Configuration
+    agent_group = parser.add_argument_group("Agent & MCP Configuration")
+    agent_group.add_argument(
+        "-c", "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
+        help=f"Override default config directory",
     )
-    parser.add_argument(
-        "-v", "--verbose", action="count", default=0,
-        help="Increase verbosity: -v shows sections/steps, -vv shows all tool output",
+    agent_group.add_argument(
+        "--mcp_file", type=Path,
+        help=f"Override default MCP servers config file",
+    )
+
+    # Skill Management (Anthropic protocol)
+    skill_group = parser.add_argument_group("Skill Management (Anthropic protocol)")
+    skill_group.add_argument(
+        "-l", "--skills", nargs="?", const="__all__", metavar="SKILL",
+        help="List saved Anthropic skills, or show detail for a specific skill",
+    )
+    skill_group.add_argument(
+        "--skill", metavar="NAME",
+        help="Explicitly use a specific Anthropic skill by name, skipping inference",
+    )
+    skill_group.add_argument(
+        "-d", "--delete", metavar="SKILL",
+        help="Delete a saved skill so it won't be used and must be re-learned",
+    )
+    skill_group.add_argument(
+        "--import", dest="import_path", metavar="PATH",
+        help="Import a skill from a directory, SKILL.md file, or .skill archive",
+    )
+    skill_group.add_argument(
+        "--export", nargs="+", metavar=("SKILL", "PATH"),
+        help="Export a skill to a .skill archive; if PATH is omitted, saves to current directory",
     )
 
     args = parser.parse_args()
@@ -2042,6 +2144,8 @@ def main():
                 agent._print_skills()
             else:
                 agent._print_skill_detail(args.skills)
+        elif args.edit:
+            agent.edit_task(args.edit)
         elif args.delete:
             agent.delete_skill(args.delete)
         elif args.import_path:

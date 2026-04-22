@@ -157,7 +157,6 @@ Override model, base URL, or key for a single run without changing saved config:
 ac -m "gpt-4o-mini" "summarise this repo in 10 bullets"
 ac -b "https://my-proxy.example.com/v1" -k "sk-..." "list all files"
 ```
-
 ### Debug: see the raw API call
 
 ```bash
@@ -165,8 +164,48 @@ ac --curlify "say hi"
 # prints the equivalent curl command before executing
 ```
 
-### Config directory
+---
 
+## Model Context Protocol (MCP)
+
+MAX AC supports [Anthropic's Model Context Protocol](https://modelcontextprotocol.io). You can connect to any MCP server to give the agent access to specialized tools (e.g. SQLite, Brave Search, Google Drive).
+
+### Configuration
+
+Config lives at `~/.local/maxac/mcp_servers.json`. 
+
+Example `mcp_servers.json`:
+
+```json
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/path/to/my/database.db"]
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "YOUR_API_KEY_HERE"
+      }
+    }
+  }
+}
+```
+
+### Usage
+
+The agent automatically connects to all configured MCP servers on startup. Tools from these servers are seamlessly integrated into the agent's planning phase.
+
+```bash
+# Use an override MCP config file for a single run
+ac --mcp_file ./custom_servers.json "search for the latest news on MCP"
+```
+
+---
+
+### Config directory
 | Platform | Default path |
 |---|---|
 | Linux | `~/.local/maxac/` |

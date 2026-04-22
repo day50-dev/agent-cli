@@ -1948,7 +1948,7 @@ def main():
     parser.add_argument("-k", "--key", help="Override API key for this run")
     parser.add_argument(
         "-c", "--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
-        help="Config directory (default: .local/maxac)",
+        help=f"Config directory (default: {DEFAULT_CONFIG_DIR})",
     )
     parser.add_argument(
         "-y", "--yes", action="store_true",
@@ -1984,7 +1984,7 @@ def main():
     )
     parser.add_argument(
         "--mcp_file", type=Path,
-        help="Path to MCP servers config file (default: ~/.local/maxac/mcp_servers.json)",
+        help=f"Path to MCP servers config file (default: {DEFAULT_CONFIG_DIR / 'mcp_servers.json'})",
     )
     parser.add_argument(
         "-v", "--verbose", action="count", default=0,
@@ -2051,7 +2051,7 @@ def main():
             output_path = args.export[1] if len(args.export) > 1 else None
             agent.export_skill(skill_name, output_path)
         else:
-            parser.print_help()
+            agent.show_status()
     except KeyboardInterrupt:
         print()
         sys.exit(130)

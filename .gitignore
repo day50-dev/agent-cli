@@ -2,3 +2,4 @@
 .qwen
 .config
 .envrc
+mcp_servers.json

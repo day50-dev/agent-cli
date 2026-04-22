@@ -1,20 +1,30 @@
-# MAX AC 
+<p align="center">
+<img width="750" height="256" alt="logo_750" src="https://github.com/user-attachments/assets/be17868c-417f-45b4-8804-9da8f812e1c3" />
 
-I watched a friend struggle with openclaw. It was too complicated for him. He didn't get it up and running.
+</p>
 
-**MAX AC** fixes that: a simple single shot agent that doesn't require complex setups or servers. No key generation or complicated configuration files. No sitting in memory or orchestrating through systemd. 
+**Stop wasting time on busted claws**
 
-It can even run locally on average GPU poor laptops.
+Openclaw is janky, insecure, doesn't get shit done, and costs too much skrilla. 
 
-It does what you ask and then goes away.
+Turn to **MAX AC**: a single shot agent. No complex setups or servers. No weirdo config files. No sitting in memory or orchestrating through systemd. 
 
-This maxes **MAX AC** the coolest terminal agent ever!
+ * It can run locally on average laptops.
+ * Everything is done in Anthropic skills. Import them, export them, modify them.
+ * Command permissions are categorized and symlinked. 
+ * Specify the skill you want for deteministic results, or don't. Up to you.
+
+MAX gets shit done and then gets out of the way. 
+
+Use **MAX AC**, the coolest terminal agent.
 
 Watch it on a cheap $500 laptop using a local model, LFM 2.5:
 
 https://github.com/user-attachments/assets/28fb8ffc-6645-4162-9c88-8864def15ba1
 
-You describe what you want. `ac` uses LLM intelligence where it matters — skill matching, tool selection, result verification — so the agent is robust. At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
+You describe what you want. `ac` udoes the rest. Skill matching, tool selection, result verification. 
+
+At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
 
 ## Skills
 

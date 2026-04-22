@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "pyyaml",
     "streamdown>=0.36",
+    "mcp",
 ]
 
 [project.urls]

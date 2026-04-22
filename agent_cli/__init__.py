@@ -16,6 +16,8 @@ Agent flow:
 """
 
 import argparse
+import asyncio
+import contextlib
 import json
 import os
 import re
@@ -26,8 +28,15 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import yaml
+
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    HAS_MCP = True
+except ImportError:
+    HAS_MCP = False
 
 
 # Default configuration — lives under site.USER_BASE (~/.local on Linux,
@@ -317,12 +326,13 @@ class AgentCLI:
     """Main maxac class."""
 
     def __init__(self, config_dir: Optional[Path] = None, auto_yes: bool = False,
-                 verbose: int = 0):
+                 verbose: int = 0, mcp_file: Optional[Path] = None):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.auto_yes = auto_yes
         self.tools_dir = self.config_dir / "tools"
         self.skills_dir = self.config_dir / "skills"
         self.config_file = self.config_dir / "config.json"
+        self.mcp_file = mcp_file or (self.config_dir / "mcp_servers.json")
 
         self.model_config = {
             "base_url": None,
@@ -333,6 +343,10 @@ class AgentCLI:
         self.out = Output(level=Output.DEBUG if verbose >= 2 else (Output.INFO if verbose >= 1 else Output.WARN))
         self._skills_migrated = False
         self._curlify_mode = False
+
+        self.mcp_sessions: Dict[str, Any] = {} # server_name -> session
+        self.mcp_tools: Dict[str, Any] = {}    # tool_name -> (server_name, tool_info)
+        self._mcp_exit_stack = None
 
         self._load_config()
         self._setup_directories()
@@ -390,6 +404,82 @@ class AgentCLI:
                     target = shutil.which(tool)
                     if target:
                         link.symlink_to(target)
+
+    # ------------------------------------------------------------------
+    # MCP (Model Context Protocol)
+    # ------------------------------------------------------------------
+    async def _connect_mcp(self):
+        """Connect to MCP servers defined in mcp_file."""
+        if not HAS_MCP:
+            return
+        if not self.mcp_file or not self.mcp_file.exists():
+            return
+
+        self._mcp_exit_stack = contextlib.AsyncExitStack()
+        
+        try:
+            with open(self.mcp_file) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.out.warn(f"Failed to load MCP config {self.mcp_file}: {e}")
+            return
+
+        servers = config.get("mcpServers", {})
+        if not servers:
+            return
+
+        for name, cfg in servers.items():
+            command = cfg.get("command")
+            if not command:
+                continue
+            args = cfg.get("args", [])
+            env = os.environ.copy()
+            env.update(cfg.get("env", {}))
+            
+            params = StdioServerParameters(command=command, args=args, env=env)
+            try:
+                # We need to manage the lifetimes of these
+                read, write = await self._mcp_exit_stack.enter_async_context(stdio_client(params))
+                session = await self._mcp_exit_stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                self.mcp_sessions[name] = session
+                
+                tools_resp = await session.list_tools()
+                for tool in tools_resp.tools:
+                    # Store tool with its server name and full info
+                    self.mcp_tools[tool.name] = (name, tool)
+                self.out.info(f"Connected to MCP server {name} ({len(tools_resp.tools)} tools)")
+            except Exception as e:
+                self.out.warn(f"Failed to connect to MCP server {name}: {e}")
+
+    async def _disconnect_mcp(self):
+        """Disconnect from all MCP servers."""
+        if self._mcp_exit_stack:
+            await self._mcp_exit_stack.aclose()
+            self._mcp_exit_stack = None
+        self.mcp_sessions = {}
+        self.mcp_tools = {}
+
+    async def _call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """Call an MCP tool and return its output as a string."""
+        if tool_name not in self.mcp_tools:
+            raise ValueError(f"Unknown MCP tool: {tool_name}")
+        
+        server_name, _ = self.mcp_tools[tool_name]
+        session = self.mcp_sessions[server_name]
+        
+        try:
+            result = await session.call_tool(tool_name, arguments)
+            # Combine all content blocks into a single string
+            output = []
+            for block in result.content:
+                if hasattr(block, 'text'):
+                    output.append(block.text)
+                elif hasattr(block, 'data'):
+                    output.append(f"[Binary data: {len(block.data)} bytes]")
+            return "\n".join(output)
+        except Exception as e:
+            return f"Error calling MCP tool {tool_name}: {e}"
 
     # ------------------------------------------------------------------
     # Tool discovery
@@ -1157,7 +1247,7 @@ class AgentCLI:
             self.out.fatal(f"failed to export skill '{skill_name}': {e}")
             return False
 
-    def apply_skill(self, skill_meta: dict, task: str = None) -> tuple[bool, str]:
+    async def apply_skill(self, skill_meta: dict, task: str = None) -> tuple[bool, str]:
         """Execute a saved skill's plan with parameter substitution.
 
         Extracts parameter values from the current task (stored in
@@ -1199,7 +1289,7 @@ class AgentCLI:
             # If this is a newly generated plan, we don't need parameter substitution
             # because it was generated for this specific task.
             self.out.section("executing")
-            return self._execute_plan(plan, task)
+            return await self._execute_plan(plan, task)
 
         if not plan:
             self.out.info("skill has no saved plan and no task provided to generate one")
@@ -1217,20 +1307,36 @@ class AgentCLI:
         resolved_plan = []
         for step in plan:
             resolved_step = dict(step)
-            resolved_args = []
-            for arg in step.get("args", []):
-                resolved_arg = arg
-                for param_name, param_value in extracted_params.items():
-                    resolved_arg = resolved_arg.replace(f"{{{{{param_name}}}}}", param_value)
-                resolved_args.append(resolved_arg)
-            resolved_step["args"] = resolved_args
+            args = step.get("args")
+            if isinstance(args, list):
+                resolved_args = []
+                for arg in args:
+                    resolved_arg = arg
+                    for param_name, param_value in extracted_params.items():
+                        resolved_arg = resolved_arg.replace(f"{{{{{param_name}}}}}", param_value)
+                    resolved_args.append(resolved_arg)
+                resolved_step["args"] = resolved_args
+            elif isinstance(args, dict):
+                resolved_args = {}
+                for k, v in args.items():
+                    if isinstance(v, str):
+                        for param_name, param_value in extracted_params.items():
+                            v = v.replace(f"{{{{{param_name}}}}}", param_value)
+                    resolved_args[k] = v
+                resolved_step["args"] = resolved_args
             resolved_plan.append(resolved_step)
 
         # Check for unresolved parameters
         unresolved = []
         for step in resolved_plan:
-            for arg in step.get("args", []):
-                unresolved.extend(re.findall(r'\{\{(\w+)\}\}', arg))
+            args = step.get("args")
+            if isinstance(args, list):
+                for arg in args:
+                    unresolved.extend(re.findall(r'\{\{(\w+)\}\}', arg))
+            elif isinstance(args, dict):
+                for v in args.values():
+                    if isinstance(v, str):
+                        unresolved.extend(re.findall(r'\{\{(\w+)\}\}', v))
         if unresolved:
             self.out.fatal(f"unresolved parameters: {', '.join(set(unresolved))}")
             return False, ""
@@ -1245,7 +1351,7 @@ class AgentCLI:
         # Validate each step
         for i, step in enumerate(resolved_plan):
             tool = step.get("tool")
-            if tool and tool not in self.all_tool_names():
+            if tool and tool not in self.all_tool_names() and tool not in self.mcp_tools:
                 resolved = self._resolve_tool(tool, step.get('action', ''))
                 if resolved is None:
                     self.out.fatal(f"tool '{tool}' not available on this system")
@@ -1254,32 +1360,13 @@ class AgentCLI:
                     step["tool"] = resolved
 
         # Execute — capture output for verification
-        captured = []
-        for i, step in enumerate(resolved_plan):
-            self.out.subsection(f"skill step {i + 1}: {step['action']}")
-            tool = step.get("tool")
-            args = step.get("args", [])
-
-            if tool:
-                rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
-                if out.strip():
-                    for line in out.strip().splitlines():
-                        self.out.output(line)
-                    captured.append(out.strip())
-                if err.strip():
-                    for line in err.strip().splitlines():
-                        self.out.output(line)
-                    captured.append(err.strip())
-            else:
-                self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
-                return False, ""
-
-        return True, "\n---\n".join(captured)
+        self.out.section("executing")
+        return await self._execute_plan(resolved_plan, task)
 
     # ------------------------------------------------------------------
     # Success condition
     # ------------------------------------------------------------------
-    def _verify_success(self, task: str, success_condition: str, captured_output: str) -> tuple[bool, str]:
+    async def _verify_success(self, task: str, success_condition: str, captured_output: str) -> tuple[bool, str]:
         """Ask the LLM to verify whether the tool output satisfies the success condition.
 
         Returns (satisfied, result_summary) where result_summary is a
@@ -1511,18 +1598,24 @@ class AgentCLI:
         tools = self.all_tool_names()
         cwd = Path.cwd()
 
+        mcp_desc = ""
+        if self.mcp_tools:
+            mcp_desc = "\nYou also have access to these MCP tools:\n"
+            for tname, (sname, tinfo) in self.mcp_tools.items():
+                mcp_desc += f"- {tname}: {tinfo.description}\n"
+            mcp_desc += "\nFor MCP tools, provide 'args' as a dictionary of keyword arguments.\n"
+
         system_prompt = (
             "You are a task planner for a command-line agent. "
             "Given a user task, the currently linked tools, and directory context, "
             "produce a JSON object with a plan and a success condition.\n\n"
             "The plan is an array of steps, each with:\n"
             '  - "action": a SHORT verb-only description (e.g. "read_cpu", "list_dir", "clone_repo")\n'
-            '  - "tool": the best system command for the job. Prefer purpose-built tools '
+            '  - "tool": the best system command or MCP tool for the job. Prefer purpose-built tools '
             '(e.g. "df" for disk space, "free" for memory, "git" for repos) over '
-            'reading raw files with cat/head. Any tool you name will be symlinked '
-            'automatically if it exists on PATH, so do NOT limit yourself to the '
-            'currently linked tools list — just pick the right tool for the task.\n'
-            '  - "args": list of string arguments for that tool\n\n'
+            'reading raw files with cat/head. Any system tool you name will be symlinked '
+            'automatically if it exists on PATH.\n'
+            '  - "args": list of string arguments for system tools, or a dictionary of arguments for MCP tools\n\n'
             'The success_condition must describe CONCRETE, DIRECTLY VERIFIABLE output. '
             'It must specify exactly what facts or values the tool output must contain.\n'
             'Bad: "output contains information about disk usage" — too vague, could be anything.\n'
@@ -1541,6 +1634,7 @@ class AgentCLI:
             "To check memory, use tool 'free' with args ['-h'].\n\n"
             "If a task changes system state (like creating a file), include a final step "
             "to output the result (e.g. ls or cat) so it can be verified."
+            + mcp_desc
         )
 
         user_prompt = (
@@ -1605,6 +1699,10 @@ class AgentCLI:
 
             self.out.section(f"validate  step {i + 1}: {step['action']}")
 
+            if tool in self.mcp_tools:
+                self.out.info(f"tool '{tool}' available via MCP")
+                continue
+
             resolved = self._resolve_tool(tool, step.get('action', ''))
             if resolved is None:
                 self.out.fatal(f"tool '{tool}' not found on system — install it or check the name")
@@ -1621,7 +1719,7 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
-    def _execute_plan(self, plan: list[dict], task: str) -> tuple[bool, str]:
+    async def _execute_plan(self, plan: list[dict], task: str) -> tuple[bool, str]:
         """Execute each plan step, returning (success, captured_output)."""
         captured = []
         for i, step in enumerate(plan):
@@ -1630,15 +1728,31 @@ class AgentCLI:
             args = step.get("args", [])
 
             if tool:
-                rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
-                if out.strip():
+                if tool in self.mcp_tools:
+                    # Call MCP tool
+                    if not isinstance(args, dict):
+                        # If the LLM still provided a list for an MCP tool, we might need to handle it
+                        # but ideally it follows the new instructions.
+                        self.out.warn(f"MCP tool '{tool}' expects dict args, but got {type(args)}")
+                        if isinstance(args, list) and not args:
+                            args = {}
+                    
+                    self.out.info(f"calling MCP tool: {tool}")
+                    out = await self._call_mcp_tool(tool, args)
                     for line in out.strip().splitlines():
                         self.out.output(line)
                     captured.append(out.strip())
-                if err.strip():
-                    for line in err.strip().splitlines():
-                        self.out.output(line)
-                    captured.append(err.strip())
+                else:
+                    # System tool
+                    rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
+                    if out.strip():
+                        for line in out.strip().splitlines():
+                            self.out.output(line)
+                        captured.append(out.strip())
+                    if err.strip():
+                        for line in err.strip().splitlines():
+                            self.out.output(line)
+                        captured.append(err.strip())
             else:
                 self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
                 return False, ""
@@ -1648,107 +1762,108 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    def execute_task(self, task: str, explicit_skill: str = None):
-        # 1. Check for applicable skills
-        self.out.section("Skills")
-        skill = None
-        if explicit_skill:
-            skill_dir = self._find_skill_dir(explicit_skill)
-            if not skill_dir:
-                self.out.fatal(f"explicit skill '{explicit_skill}' not found")
-                sys.exit(1)
-            meta = self._parse_skill_md(skill_dir)
-            if not meta:
-                self.out.fatal(f"explicit skill '{explicit_skill}' missing SKILL.md metadata")
-                sys.exit(1)
-            skill = meta
-            self.out.info(f"using explicit skill: {skill['name']}")
-        else:
-            skill = self._find_applicable_skill(task)
-            if skill:
-                self.out.info(f"skill match: {skill['name']}")
-
-        skill_success_condition = None
-        if skill:
-            # 2. Apply skill — capture output for verification
-            self.out.section("Applying")
-            ok, captured = self.apply_skill(skill, task=task)
-            if ok:
-                # Load the skill's saved success condition for verification
-                full_skill = self._load_skill(skill['name'])
-                skill_success_condition = full_skill.get("success_condition", "")
-                # Backwards compat: old skills stored success_condition as a dict
-                if isinstance(skill_success_condition, dict):
-                    skill_success_condition = skill_success_condition.get("description", "")
-                # Substitute any parameter placeholders
-                extracted = skill.get("_extracted_params", {})
-                for pname, pval in extracted.items():
-                    skill_success_condition = skill_success_condition.replace(f"{{{{{pname}}}}}", pval)
-
-                if skill_success_condition:
-                    self.out.section("Verifying")
-                    ok, result_summary = self._verify_success(task, skill_success_condition, captured)
-                    if ok:
-                        self.out.separator()
-                        if result_summary:
-                            self.out.result(result_summary)
-                        self.out.info(skill_success_condition)
-                        return
-                else:
-                    # No saved condition — can't verify, assume ok
-                    self.out.separator()
-                    self.out.info(f"skill completed: {skill['name']}")
-                    return
-            
+    async def execute_task(self, task: str, explicit_skill: str = None):
+        async with self._mcp_context():
+            # 1. Check for applicable skills
+            self.out.section("Skills")
+            skill = None
             if explicit_skill:
-                # If explicit skill fails verification, we stop here.
-                self.out.fatal(f"explicit skill '{explicit_skill}' failed verification")
+                skill_dir = self._find_skill_dir(explicit_skill)
+                if not skill_dir:
+                    self.out.fatal(f"explicit skill '{explicit_skill}' not found")
+                    sys.exit(1)
+                meta = self._parse_skill_md(skill_dir)
+                if not meta:
+                    self.out.fatal(f"explicit skill '{explicit_skill}' missing SKILL.md metadata")
+                    sys.exit(1)
+                skill = meta
+                self.out.info(f"using explicit skill: {skill['name']}")
+            else:
+                skill = self._find_applicable_skill(task)
+                if skill:
+                    self.out.info(f"skill match: {skill['name']}")
+
+            skill_success_condition = None
+            if skill:
+                # 2. Apply skill — capture output for verification
+                self.out.section("Applying")
+                ok, captured = await self.apply_skill(skill, task=task)
+                if ok:
+                    # Load the skill's saved success condition for verification
+                    full_skill = self._load_skill(skill['name'])
+                    skill_success_condition = full_skill.get("success_condition", "")
+                    # Backwards compat: old skills stored success_condition as a dict
+                    if isinstance(skill_success_condition, dict):
+                        skill_success_condition = skill_success_condition.get("description", "")
+                    # Substitute any parameter placeholders
+                    extracted = skill.get("_extracted_params", {})
+                    for pname, pval in extracted.items():
+                        skill_success_condition = skill_success_condition.replace(f"{{{{{pname}}}}}", pval)
+
+                    if skill_success_condition:
+                        self.out.section("Verifying")
+                        ok, result_summary = await self._verify_success(task, skill_success_condition, captured)
+                        if ok:
+                            self.out.separator()
+                            if result_summary:
+                                self.out.result(result_summary)
+                            self.out.info(skill_success_condition)
+                            return
+                    else:
+                        # No saved condition — can't verify, assume ok
+                        self.out.separator()
+                        self.out.info(f"skill completed: {skill['name']}")
+                        return
+                
+                if explicit_skill:
+                    # If explicit skill fails verification, we stop here.
+                    self.out.fatal(f"explicit skill '{explicit_skill}' failed verification")
+                    sys.exit(1)
+
+                self.out.warning("skill did not satisfy — falling back to plan")
+            else:
+                self.out.info("none found")
+
+            # 3. Create plan + success condition via LLM
+            self.out.section("plan")
+            plan, success_condition = self._create_plan(task)
+            for i, step in enumerate(plan):
+                tool = step.get("tool", "(none)")
+                self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
+            self.out.info(f"success condition: {success_condition}")
+
+            # 4. Validate plan (may rewrite tool names if alternatives are needed)
+            self.out.section("validate")
+            if not self._validate_plan(plan):
+                self.out.fatal("validation failed")
                 sys.exit(1)
+            self.out.info("all steps valid")
 
-            self.out.warning("skill did not satisfy — falling back to plan")
-        else:
-            self.out.info("none found")
+            # Compute tools_in_plan AFTER validation so rewritten names are captured
+            tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
 
-        # 3. Create plan + success condition via LLM
-        self.out.section("plan")
-        plan, success_condition = self._create_plan(task)
-        for i, step in enumerate(plan):
-            tool = step.get("tool", "(none)")
-            self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
-        self.out.info(f"success condition: {success_condition}")
+            # 5. Execute — capture output
+            self.out.section("execute")
+            _, captured = await self._execute_plan(plan, task)
 
-        # 4. Validate plan (may rewrite tool names if alternatives are needed)
-        self.out.section("validate")
-        if not self._validate_plan(plan):
-            self.out.fatal("validation failed")
-            sys.exit(1)
-        self.out.info("all steps valid")
-
-        # Compute tools_in_plan AFTER validation so rewritten names are captured
-        tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
-
-        # 5. Execute — capture output
-        self.out.section("execute")
-        _, captured = self._execute_plan(plan, task)
-
-        # 6. Verify against success condition & save skill
-        self.out.section("verify")
-        verified, result_summary = self._verify_success(task, success_condition, captured)
-        if verified:
-            self.out.separator()
-            if result_summary:
-                self.out.result(result_summary)
-            skill_path = self._save_skill(task, plan, success_condition, tools_in_plan, success=True)
-            self.out.info(f"SUCCESS  {success_condition}")
-            if skill_path:
-                self.out.info(f"skill saved → {Path(skill_path).name}")
-        else:
-            if result_summary:
-                self.out.result(f"partial result: {result_summary}")
-            self._save_skill(task, plan, success_condition, tools_in_plan, success=False)
-            self.out.separator()
-            self.out.fatal(f"FAILED  {success_condition}")
-            sys.exit(1)
+            # 6. Verify against success condition & save skill
+            self.out.section("verify")
+            verified, result_summary = await self._verify_success(task, success_condition, captured)
+            if verified:
+                self.out.separator()
+                if result_summary:
+                    self.out.result(result_summary)
+                skill_path = self._save_skill(task, plan, success_condition, tools_in_plan, success=True)
+                self.out.info(f"SUCCESS  {success_condition}")
+                if skill_path:
+                    self.out.info(f"skill saved → {Path(skill_path).name}")
+            else:
+                if result_summary:
+                    self.out.result(f"partial result: {result_summary}")
+                self._save_skill(task, plan, success_condition, tools_in_plan, success=False)
+                self.out.separator()
+                self.out.fatal(f"FAILED  {success_condition}")
+                sys.exit(1)
 
     def show_status(self):
         tools = self.get_all_symlinked_tools()
@@ -1756,10 +1871,31 @@ class AgentCLI:
         for task, names in sorted(tools.items()):
             md += f"- **{task}/bin/** {'  '.join(names)}\n"
         md += "\n"
+        md += self._mcp_status_markdown()
         md += self._skills_markdown()
         md += "\n---\n\n"
         md += "* `ac '<task>'`\n* `ac --skills [name]`\n* `ac -d <skill>`\n* `ac -s model 'model-name'`\n"
         self.out.markdown(md)
+
+    def _mcp_status_markdown(self) -> str:
+        """Build a markdown MCP servers section string."""
+        if not self.mcp_file or not self.mcp_file.exists():
+            return ""
+        
+        md = "### MCP Servers\n"
+        try:
+            with open(self.mcp_file) as f:
+                config = json.load(f)
+                servers = config.get("mcpServers", {})
+                if not servers:
+                    md += "*none configured*\n"
+                else:
+                    for name in sorted(servers.keys()):
+                        md += f"- **{name}**\n"
+        except Exception:
+            md += "*error reading config*\n"
+        md += "\n"
+        return md
 
     def _skills_markdown(self) -> str:
         """Build a markdown skills section string."""
@@ -1847,12 +1983,21 @@ def main():
         help="Print the curl equivalent of the model API call for debugging",
     )
     parser.add_argument(
+        "--mcp_file", type=Path,
+        help="Path to MCP servers config file (default: ~/.local/maxac/mcp_servers.json)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase verbosity: -v shows sections/steps, -vv shows all tool output",
     )
 
     args = parser.parse_args()
-    agent = AgentCLI(config_dir=args.config_dir, auto_yes=args.yes, verbose=args.verbose)
+    agent = AgentCLI(
+        config_dir=args.config_dir,
+        auto_yes=args.yes,
+        verbose=args.verbose,
+        mcp_file=args.mcp_file
+    )
     agent._curlify_mode = args.curlify
 
     try:
@@ -1891,7 +2036,7 @@ def main():
             task = path.read_text().strip()
 
         if task:
-            agent.execute_task(task, explicit_skill=args.skill)
+            asyncio.run(agent.execute_task(task, explicit_skill=args.skill))
         elif args.skills:
             if args.skills == "__all__":
                 agent._print_skills()

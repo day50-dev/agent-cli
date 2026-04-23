@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -- coding: utf-8 --
 """
 maxac: A one-shot command-line helper with scoped execution tasks.
 
@@ -39,13 +40,14 @@ except ImportError:
     HAS_MCP = False
 
 
-# Default configuration — lives under site.USER_BASE (~/.local on Linux,
+# Default configuration - lives under site.USER_BASE (~/.local on Linux,
 # ~/Library/Python/<ver> on macOS) so it's always in a stable user location,
 # not relative to the current working directory.
 DEFAULT_CONFIG_DIR = Path(site.USER_BASE) / "maxac"
 DEFAULT_TOOLS_DIR = DEFAULT_CONFIG_DIR / "tools"
 DEFAULT_SKILLS_DIR = DEFAULT_CONFIG_DIR / "skills"
 DEFAULT_TASKS_DIR = DEFAULT_CONFIG_DIR / "tasks"
+DEFAULT_LOGS_DIR = DEFAULT_CONFIG_DIR / "logs"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 
 # Minimal default tools by task category
@@ -54,7 +56,7 @@ DEFAULT_TOOLS = {
     "find": ["cat", "head", "tail", "ls"],
 }
 
-# Tool name → task category classification.
+# Tool name -> task category classification.
 # Used to decide where a newly discovered tool gets symlinked.
 TOOL_TASK_CLASSIFIER = {
     # version control
@@ -105,7 +107,7 @@ def classify_tool(name: str) -> str:
     return TOOL_TASK_CLASSIFIER.get(name, "general")
 
 
-# ANSI escape codes — module-level for use by Spinner animation.
+# ANSI escape codes - module-level for use by Spinner animation.
 _ANSI_BOLD   = "\033[1m"
 _ANSI_DIM    = "\033[2m"
 _ANSI_RESET  = "\033[0m"
@@ -127,7 +129,7 @@ def _md_escape(text: str) -> str:
 
 
 # ------------------------------------------------------------------
-# Output primitives — semantic abstractions for CLI display
+# Output primitives - semantic abstractions for CLI display
 # ------------------------------------------------------------------
 
 class Output:
@@ -143,19 +145,21 @@ class Output:
     since their content is arbitrary / needs stdin interaction.
 
     Log levels control verbosity during task execution:
-      WARN  — only the task, result summary, and outcome (default)
-      INFO  — plus section headers, step descriptions, and notes  (-v)
-      DEBUG — plus tool stdout/stderr, commands, subsections       (-vv)
+      WARN  - only the task, result summary, and outcome (default)
+      INFO  - plus section headers, step descriptions, and notes  (-v)
+      DEBUG - plus tool stdout/stderr, commands, subsections       (-vv)
     """
 
-    # Log levels — higher = more verbose
+    # Log levels - higher = more verbose
     WARN = 0
     INFO = 1
     DEBUG = 2
 
-    def __init__(self, level: int = 0):
+    def __init__(self, level: int = 0, log_path: Optional[Path] = None):
         self.level = level
         self._sd = None
+        self._log_buffer = []
+        self.log_path = log_path
         try:
             from streamdown import Streamdown
             self._sd = Streamdown()
@@ -169,8 +173,13 @@ class Output:
         if self._sd:
             self._sd.tidyup()
 
+    def _log(self, text: str) -> None:
+        """Append text to the internal log buffer."""
+        self._log_buffer.append(text)
+
     def _render(self, text: str) -> None:
         """Render a markdown fragment through streamdown, or fall back to print."""
+        self._log(text) # Always log the text
         if self._sd:
             self._sd.render(text)
         else:
@@ -186,17 +195,17 @@ class Output:
     # ---- semantic primitives ----
 
     def headline(self, text: str) -> None:
-        """Top-level task title — shown at INFO level and above."""
+        """Top-level task title - shown at INFO level and above."""
         if self.level >= self.INFO:
             self._render(f"# {text}\n\n")
 
     def section(self, text: str) -> None:
-        """Sub-step / phase header — shown at INFO level and above."""
+        """Sub-step / phase header - shown at INFO level and above."""
         if self.level >= self.INFO:
             self._render(f"\n### {text}\n")
 
     def subsection(self, text: str) -> None:
-        """Sub-step detail — only shown at DEBUG level."""
+        """Sub-step detail - only shown at DEBUG level."""
         if self.level >= self.DEBUG:
             self._render(f"\n#### {text}\n")
 
@@ -213,48 +222,53 @@ class Output:
         self._render(f"✗ **{text}**\n")
 
     def info(self, text: str) -> None:
-        """Neutral informational note — shown at INFO level and above."""
+        """Neutral informational note - shown at INFO level and above."""
         if self.level >= self.INFO:
             self._render(f"* {text}\n")
 
     def command(self, text: str) -> None:
-        """A command about to be executed — only shown at DEBUG level."""
+        """A command about to be executed - only shown at DEBUG level."""
         if self.level >= self.DEBUG:
             self._render(f"- {_md_escape(text)}\n")
 
     def output(self, text: str) -> None:
-        """Captured output line from a tool — only shown at DEBUG level."""
+        """Captured output line from a tool - only shown at DEBUG level."""
         if self.level >= self.DEBUG:
             self._render(f"> {_md_escape(text)}\n")
 
     def prompt(self, text: str, end: str = "\n") -> None:
         """User interaction prompt."""
-        # Interactive prompts need direct stdout — don't render as markdown.
+        # Interactive prompts need direct stdout - don't render as markdown.
+        self._log(text) # Log prompt text as well
         print(f"\n  {text}", end=end)
 
     def separator(self) -> None:
-        """Horizontal rule separating major sections — shown at INFO level and above."""
+        """Horizontal rule separating major sections - shown at INFO level and above."""
         if self.level >= self.INFO:
             self._render("---\n\n")
 
     # ---- compound helpers ----
 
     def result(self, text: str) -> None:
-        """Final result / answer to the user's task — always shown, no prefix marker."""
+        """Final result / answer to the users task - always shown, no prefix marker."""
+        self._log(text) # Always log result text
         self._render(f"{text}\n")
 
     def kv(self, key: str, value: str) -> None:
         """Key-value pair in a detail view (left-aligned label + value)."""
+        self._log(f"{key}: {value}\n") # Always log KV pairs
         self._render(f"* {key}: `{_md_escape(value)}`\n")
 
     def sublist(self, text: str) -> None:
         """Sub-list item (indented under a parent list item)."""
+        self._log(f"  - {text}\n")
         self._render(f"  - {text}\n")
 
     # ---- markdown rendering (streamdown) ----
 
     def markdown(self, text: str) -> None:
         """Render a bulk markdown document through streamdown."""
+        self._log(text) # Always log markdown text
         self._render(text)
 
     # ---- spinner ----
@@ -262,6 +276,22 @@ class Output:
     def spinner(self, label: str = "Thinking"):
         """Return a Spinner context manager animating while waiting."""
         return Spinner(label, no_color=not sys.stdout.isatty())
+
+    def get_log_content(self) -> str:
+        """Return the entire captured log content."""
+        return "".join(self._log_buffer)
+
+    def save_log(self) -> Optional[Path]:
+        """Save the captured log content to a file if a log_path is set."""
+        if self.log_path and self._log_buffer:
+            try:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.log_path, "w") as f:
+                    f.write("".join(self._log_buffer))
+                return self.log_path
+            except Exception as e:
+                self.fatal(f"Failed to save log to {self.log_path}: {e}")
+        return None
 
 
 class Spinner:
@@ -307,7 +337,7 @@ class Spinner:
 
     def __enter__(self):
         if self._no_tty:
-            # Complete no-op when stdout is not a TTY — avoids garbled piped output
+            # Complete no-op when stdout is not a TTY - avoids garbled piped output
             return self
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
@@ -342,7 +372,8 @@ class AgentCLI:
             "key": None,
         }
 
-        self.out = Output(level=Output.DEBUG if verbose >= 2 else (Output.INFO if verbose >= 1 else Output.WARN))
+        self.out = Output(level=Output.DEBUG if verbose >= 2 else (Output.INFO if verbose >= 1 else Output.WARN),
+                          log_path=self.config_dir / "last_run.log") # Log to a file in config dir
         self._skills_migrated = False
         self._curlify_mode = False
 
@@ -411,6 +442,15 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # MCP (Model Context Protocol)
     # ------------------------------------------------------------------
+    @contextlib.asynccontextmanager
+    async def _mcp_context(self):
+        """Context manager to handle MCP server connections."""
+        await self._connect_mcp()
+        try:
+            yield
+        finally:
+            await self._disconnect_mcp()
+
     async def _connect_mcp(self):
         """Connect to MCP servers defined in mcp_file."""
         if not HAS_MCP:
@@ -541,7 +581,7 @@ class AgentCLI:
         return 1, "", f"Tool '{tool}' not found in symlinked tools"
 
     def _system_search_tool(self, name: str) -> bool:
-        """Search for *name* via whatis/apropos — last-resort RAG fallback.
+        """Search for *name* via whatis/apropos - last-resort RAG fallback.
 
         Called by _resolve_tool() only after PATH checks and LLM
         consultation have already failed.
@@ -558,10 +598,10 @@ class AgentCLI:
         """Resolve a tool needed by a plan step.
 
         Resolution order:
-          1. Already symlinked → return as-is
-          2. Found in tasks/ directory → return as-is (Task Tool)
-          3. On PATH → symlink and return as-is
-          4. Ask the LLM for an alternative → if suggested tool is on PATH, use that
+          1. Already symlinked - return as-is
+          2. Found in tasks/ directory - return as-is (Task Tool)
+          3. On PATH - symlink and return as-is
+          4. Ask the LLM for an alternative - if suggested tool is on PATH, use that
           5. Fall back to apropos/whatis system search (RAG)
 
         Returns the resolved tool name (may differ from *tool* if the LLM
@@ -578,14 +618,14 @@ class AgentCLI:
             if (self.tasks_dir / f"{tool}{ext}").exists():
                 return f"{tool}{ext}"
 
-        # 3. On PATH — just symlink it
+        # 3. On PATH - just symlink it
         if shutil.which(tool):
             if self.symlink_tool(tool, auto_yes=self.auto_yes):
                 return tool
             return None
 
-        # 3. Ask the LLM — it may know an alternative that IS on this system
-        self.out.info(f"tool '{tool}' not on PATH — asking model for alternative")
+        # 3. Ask the LLM - it may know an alternative that IS on this system
+        self.out.info(f"tool '{tool}' not on PATH - asking model for alternative")
         resolved = self._llm_resolve_tool(tool, action)
         if resolved and resolved != tool and shutil.which(resolved):
             self.out.info(f"model suggests '{resolved}' instead of '{tool}'")
@@ -601,9 +641,9 @@ class AgentCLI:
         return None
 
     def _llm_resolve_tool(self, tool: str, action: str) -> Optional[str]:
-        """Ask the LLM what tool to use for *action* when *tool* isn't available.
+        """Ask the LLM what tool to use for *action* when *tool* is not available.
 
-        Returns a tool name string, or None if the LLM doesn't know.
+        Returns a tool name string, or None if the LLM does not know.
         """
         system_prompt = (
             "You are a Unix system expert. The planned tool is not installed "
@@ -649,7 +689,7 @@ class AgentCLI:
 
         path = self.find_tool_path(name)
         if not path:
-            self.out.fatal(f"'{name}' not found on PATH — may need to be installed")
+            self.out.fatal(f"'{name}' not found on PATH - may need to be installed")
             return False
 
         if task is None:
@@ -660,7 +700,7 @@ class AgentCLI:
         link = task_bin / name
 
         if auto_yes:
-            self.out.info(f"symlink  {name} → {path}  [{task}]")
+            self.out.info(f"symlink  {name} -> {path}  [{task}]")
         else:
             self.out.prompt(f"Allow '{name}' ({path}) [{task}] (y/n)? ", end="")
             resp = sys.stdin.readline().strip().lower()
@@ -677,9 +717,9 @@ class AgentCLI:
     #
     # Each skill is stored as a directory:
     #   skills/<skill-name>/
-    #     SKILL.md   — YAML frontmatter (name, description) + markdown
+    #     SKILL.md   - YAML frontmatter (name, description) + markdown
     #                   body with instructions / context for LLM use
-    #     plan.json  — machine-readable execution data:
+    #     plan.json  - machine-readable execution data:
     #                   plan, params_map, success_condition,
     #                   success_count, tools_used
     #
@@ -706,7 +746,7 @@ class AgentCLI:
             skill_name = data.get("name", f.stem)
             skill_dir = self.skills_dir / skill_name
             if skill_dir.exists():
-                # Already migrated — remove orphaned JSON
+                # Already migrated - remove orphaned JSON
                 f.unlink()
                 continue
 
@@ -744,7 +784,7 @@ class AgentCLI:
             # Remove the old JSON file
             f.unlink()
 
-        # Also clean up skills that were previously 'invalidated' —
+        # Also clean up skills that were previously 'invalidated' -
         # invalidate is now delete, so legacy invalidated dirs are stale.
         for d in list(self.skills_dir.iterdir()):
             if not d.is_dir():
@@ -834,7 +874,7 @@ class AgentCLI:
             "user's task.  CRITICAL: Do NOT match a generic skill (e.g. one "
             "that just runs 'cat' or 'ls') when the user's task clearly needs "
             "a purpose-built tool (e.g. 'df' for disk space, 'free' for memory). "
-            "A skill must be a SPECIFIC, meaningful procedure — not a single "
+            "A skill must be a SPECIFIC, meaningful procedure - not a single "
             "trivial command.  If no skill is a genuine fit, respond with null.\n\n"
             "Respond ONLY with valid JSON in this exact format:\n"
             "{\n"
@@ -922,7 +962,7 @@ class AgentCLI:
 
         Replaces the former heuristic chain (_generalize_skill_name +
         _infer_param_name + _parameterize_plan) with a single LLM call
-        that understands semantics — e.g. that 'clone' in "git clone" is a
+        that understands semantics - e.g. that 'clone' in "git clone" is a
         static sub-command while the URL is the variable input.
 
         Returns (skill_name, parameterized_plan, params_map) where:
@@ -941,7 +981,7 @@ class AgentCLI:
             "2. Identify which arguments in the plan are VARIABLE inputs from the "
             "user's task (URLs, paths, repo names, versions, branch names, etc.).\n"
             "   Do NOT parameterize static command sub-words (clone, ls, install, etc.) "
-            "or flags (-v, --all, -h, etc.) — those are part of the tool's interface.\n"
+            "or flags (-v, --all, -h, etc.) - those are part of the tool's interface.\n"
             "3. Give each variable a semantic parameter name (e.g. 'repository_url', "
             "'target_dir', 'branch_name').\n"
             "4. Return the plan with variable args replaced by {{param_name}}.\n\n"
@@ -1008,12 +1048,12 @@ class AgentCLI:
         """Persist the completed task as a reusable, parameterized skill.
 
         Skills are stored in Anthropic SKILL.md directory format:
-          skills/<name>/SKILL.md  — frontmatter + instructions
-          skills/<name>/plan.json  — machine-readable plan data
+          skills/<name>/SKILL.md  - frontmatter + instructions
+          skills/<name>/plan.json  - machine-readable plan data
         """
         # Don't save skills that don't actually do anything
         if not tools_used:
-            self.out.info("no tools used — skill not saved (empty plans are useless)")
+            self.out.info("no tools used - skill not saved (empty plans are useless)")
             return None
 
         self.skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1040,13 +1080,13 @@ class AgentCLI:
                     )
                 )
                 if not same_structure:
-                    # Different plan structure — save as a variant
+                    # Different plan structure - save as a variant
                     variant = len(plan)
                     skill_name = f"{skill_name}-{variant}"
                     skill_dir = self.skills_dir / skill_name
                     existing_plan_data = {}
                 else:
-                    # Same structure — bump success count, keep existing parameterization
+                    # Same structure - bump success count, keep existing parameterization
                     existing_plan_data["success_count"] = existing_plan_data.get("success_count", 0) + (1 if success else 0)
                     with open(plan_file, "w") as fh:
                         json.dump(existing_plan_data, fh, indent=2)
@@ -1084,7 +1124,7 @@ class AgentCLI:
         # Build instruction body
         param_lines = []
         for orig_val, param_name in params_map.items():
-            param_lines.append(f"- `{{{{{param_name}}}}}` — extracted from task string (was `{orig_val}`)")
+            param_lines.append(f"- `{{{{{param_name}}}}}` - extracted from task string (was `{orig_val}`)")
         params_section = ""
         if param_lines:
             params_section = (
@@ -1142,7 +1182,7 @@ class AgentCLI:
         return True
 
     def edit_task(self, task_name: str) -> bool:
-        """Open a task script in the user's default editor."""
+        """Open a task script in the users default editor."""
         # Find the task file (could have various extensions: .sh, .py, .txt, etc.)
         task_path = None
         if (self.tasks_dir / task_name).exists():
@@ -1183,7 +1223,7 @@ class AgentCLI:
             skill_name = meta.get("name") or path.name
             dest_dir = self.skills_dir / skill_name
             if dest_dir.exists():
-                self.out.warning(f"skill '{skill_name}' already exists — overwriting")
+                self.out.warning(f"skill '{skill_name}' already exists - overwriting")
                 shutil.rmtree(dest_dir)
             shutil.copytree(path, dest_dir)
             self.out.success(f"imported skill '{skill_name}' from directory")
@@ -1219,7 +1259,7 @@ class AgentCLI:
                                     if skill_name:
                                         dest_dir = self.skills_dir / skill_name
                                         if dest_dir.exists():
-                                            self.out.warning(f"skill '{skill_name}' already exists — overwriting")
+                                            self.out.warning(f"skill '{skill_name}' already exists - overwriting")
                                             shutil.rmtree(dest_dir)
                                         shutil.copytree(root, dest_dir)
                                         self.out.success(f"imported skill '{skill_name}' from archive")
@@ -1285,14 +1325,14 @@ class AgentCLI:
             return False
 
     async def apply_skill(self, skill_meta: dict, task: str = None) -> tuple[bool, str]:
-        """Execute a saved skill's plan with parameter substitution.
+        """Execute a saved skills plan with parameter substitution.
 
         Extracts parameter values from the current task (stored in
         skill_meta["_extracted_params"] by _find_applicable_skill), substitutes
         them into the parameterized plan, then executes.
 
         If no plan exists (e.g. for a newly imported skill), a new plan is
-        generated using the skill's instructions as context.
+        generated using the skills instructions as context.
 
         Returns (success, captured_output).
         """
@@ -1334,7 +1374,7 @@ class AgentCLI:
 
         # Reject skills where no step actually does anything
         if not any(step.get("tool") for step in plan):
-            self.out.warning(f"skill '{skill_meta['name']}' has no executable steps — skipping")
+            self.out.warning(f"skill '{skill_meta['name']}' has no executable steps - skipping")
             return False, ""
 
         # Get extracted parameters (set by _find_applicable_skill)
@@ -1396,7 +1436,7 @@ class AgentCLI:
                 if resolved != tool:
                     step["tool"] = resolved
 
-        # Execute — capture output for verification
+        # Execute - capture output for verification
         self.out.section("executing")
         return await self._execute_plan(resolved_plan, task)
 
@@ -1411,7 +1451,7 @@ class AgentCLI:
         (e.g. "The CPU is AMD Ryzen 7 and the memory is 16GB").
         """
         if not captured_output.strip():
-            self.out.fatal("no output produced — cannot verify success")
+            self.out.fatal("no output produced - cannot verify success")
             return False, ""
 
         # Truncate output to avoid excessive token usage.
@@ -1453,7 +1493,7 @@ class AgentCLI:
         ])
 
         if result is None:
-            self.out.warning("verification call failed — cannot confirm success")
+            self.out.warning("verification call failed - cannot confirm success")
             return False, ""
 
         result = result.strip()
@@ -1474,7 +1514,7 @@ class AgentCLI:
                 self.out.fatal(f"verification failed: {reason}")
                 return False, result_summary
         except (json.JSONDecodeError, ValueError):
-            self.out.warning("verification response unparseable — cannot confirm success")
+            self.out.warning("verification response unparseable - cannot confirm success")
             return False, ""
 
     # ------------------------------------------------------------------
@@ -1484,8 +1524,8 @@ class AgentCLI:
         """Return a base URL that includes the /v1 (or /vN) API version prefix.
 
         Most OpenAI-compatible providers expect paths like /v1/chat/completions.
-        If the user's base_url already ends with a version segment (e.g. /v1,
-        /v2, /v1beta), it's kept as-is.  Otherwise /v1 is appended automatically.
+        If the users base_url already ends with a version segment (e.g. /v1,
+        /v2, /v1beta), its kept as-is.  Otherwise /v1 is appended automatically.
         """
         base_url = self.model_config.get("base_url") or "https://api.openai.com/v1"
         base_url = base_url.rstrip('/')
@@ -1553,7 +1593,7 @@ class AgentCLI:
     def _curlify(url: str, headers: dict, data: bytes) -> str:
         """Build a curl(1) command equivalent to the given HTTP request.
 
-        Useful for debugging — paste the output into a terminal to
+        Useful for debugging - paste the output into a terminal to
         reproduce the exact request.
         """
         parts = ["curl", url]
@@ -1662,8 +1702,8 @@ class AgentCLI:
             "This makes your capabilities explicit and easy for the user to refine later.\n\n"
             'The success_condition must describe CONCRETE, DIRECTLY VERIFIABLE output. '
             'It must specify exactly what facts or values the tool output must contain.\n'
-            'Bad: "output contains information about disk usage" — too vague, could be anything.\n'
-            'Bad: "output can be used to infer disk space" — inferential, not directly verifiable.\n'
+            'Bad: "output contains information about disk usage" - too vague, could be anything.\n'
+            'Bad: "output can be used to infer disk space" - inferential, not directly verifiable.\n'
             'Good: "output contains filesystem mount points and their total/used/available space".\n'
             'Good: "output contains the CPU model name and total memory in kB".\n\n'
             "Return ONLY valid JSON in this format:\n"
@@ -1684,7 +1724,7 @@ class AgentCLI:
         user_prompt = (
             f"Task: {task}\n"
             f"Currently linked tools: {', '.join(sorted(tools))}\n"
-            "(You may request any system tool — it will be symlinked automatically.)\n"
+            "(You may request any system tool - it will be symlinked automatically.)\n"
             f"Current directory: {cwd}\n"
             f"Files: {', '.join(f.name for f in cwd.iterdir() if f.is_file())[:200]}\n"
             f"Dirs: {', '.join(d.name for d in cwd.iterdir() if d.is_dir())[:200]}"
@@ -1724,21 +1764,15 @@ class AgentCLI:
             self.out.info("plan generated by model")
             return plan, success_condition
         except (json.JSONDecodeError, ValueError, KeyError):
-            self.out.fatal("model response was not valid JSON — cannot proceed")
+            self.out.fatal("model response was not valid JSON - cannot proceed")
             sys.exit(1)
 
 
     def _validate_plan(self, plan: list[dict]) -> bool:
-        """Validate that every step uses a tool that can be resolved.
-
-        Uses _resolve_tool() which tries PATH → LLM alternative → apropos
-        before giving up.  If the LLM suggests a different tool, the
-        plan step is rewritten in-place to use the alternative.
-        """
         for i, step in enumerate(plan):
             tool = step.get("tool")
             if not tool:
-                self.out.fatal(f"step {i + 1} ('{step.get('action', '?')}') has no tool — cannot execute")
+                self.out.fatal(f"step {i + 1} ('{step.get('action', '?')}') has no tool - cannot execute")
                 return False
 
             self.out.section(f"validate  step {i + 1}: {step['action']}")
@@ -1749,11 +1783,11 @@ class AgentCLI:
 
             resolved = self._resolve_tool(tool, step.get('action', ''))
             if resolved is None:
-                self.out.fatal(f"tool '{tool}' not found on system — install it or check the name")
+                self.out.fatal(f"tool '{tool}' not found on system - install it or check the name")
                 return False
 
             if resolved != tool:
-                # LLM suggested an alternative — rewrite the step
+                # LLM suggested an alternative - rewrite the step
                 self.out.info(f"using '{resolved}' instead of '{tool}'")
                 step["tool"] = resolved
             else:
@@ -1764,7 +1798,7 @@ class AgentCLI:
     # Execution
     # ------------------------------------------------------------------
     async def _execute_plan(self, plan: list[dict], task: str) -> tuple[bool, str]:
-        """Execute each plan step, returning (success, captured_output)."""
+        # Execute each plan step, returning (success, captured_output).
         captured = []
         for i, step in enumerate(plan):
             self.out.section(f"execute  step {i + 1}: {step['action']}")
@@ -1817,7 +1851,7 @@ class AgentCLI:
                             self.out.output(line)
                         captured.append(err.strip())
             else:
-                self.out.fatal(f"no tool for step '{step['action']}' — cannot execute")
+                self.out.fatal(f"no tool for step '{step['action']}' - cannot execute")
                 return False, ""
 
         return True, "\n---\n".join(captured)
@@ -1848,11 +1882,11 @@ class AgentCLI:
 
             skill_success_condition = None
             if skill:
-                # 2. Apply skill — capture output for verification
+                # 2. Apply skill - capture output for verification
                 self.out.section("Applying")
                 ok, captured = await self.apply_skill(skill, task=task)
                 if ok:
-                    # Load the skill's saved success condition for verification
+                    # Load the skills saved success condition for verification
                     full_skill = self._load_skill(skill['name'])
                     skill_success_condition = full_skill.get("success_condition", "")
                     # Backwards compat: old skills stored success_condition as a dict
@@ -1873,7 +1907,7 @@ class AgentCLI:
                             self.out.info(skill_success_condition)
                             return
                     else:
-                        # No saved condition — can't verify, assume ok
+                        # No saved condition - can't verify, assume ok
                         self.out.separator()
                         self.out.info(f"skill completed: {skill['name']}")
                         return
@@ -1883,7 +1917,7 @@ class AgentCLI:
                     self.out.fatal(f"explicit skill '{explicit_skill}' failed verification")
                     sys.exit(1)
 
-                self.out.warning("skill did not satisfy — falling back to plan")
+                self.out.warning("skill did not satisfy - falling back to plan")
             else:
                 self.out.info("none found")
 
@@ -1905,7 +1939,7 @@ class AgentCLI:
             # Compute tools_in_plan AFTER validation so rewritten names are captured
             tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
 
-            # 5. Execute — capture output
+            # 5. Execute - capture output
             self.out.section("execute")
             _, captured = await self._execute_plan(plan, task)
 
@@ -1919,13 +1953,16 @@ class AgentCLI:
                 skill_path = self._save_skill(task, plan, success_condition, tools_in_plan, success=True)
                 self.out.info(f"SUCCESS  {success_condition}")
                 if skill_path:
-                    self.out.info(f"skill saved → {Path(skill_path).name}")
+                    self.out.info(f"skill saved -> {Path(skill_path).name}")
             else:
                 if result_summary:
                     self.out.result(f"partial result: {result_summary}")
                 self._save_skill(task, plan, success_condition, tools_in_plan, success=False)
                 self.out.separator()
                 self.out.fatal(f"FAILED  {success_condition}")
+                log_file_path = self.out.save_log()
+                if log_file_path:
+                    self.out.fatal(f"Log available at: {log_file_path}")
                 sys.exit(1)
 
     def show_status(self):
@@ -1946,13 +1983,13 @@ class AgentCLI:
         self.out.markdown(md)
 
     def _tasks_markdown(self) -> str:
-        """Build a markdown tasks (scripts) section string."""
+        # Build a markdown tasks (scripts) section string.
         if not self.tasks_dir.exists():
             return ""
         tasks = sorted([f.name for f in self.tasks_dir.iterdir() if f.is_file()])
         md = "### Tasks (Scripts)\n"
         if not tasks:
-            md += "*none yet — save tools or scripts to ~/local/maxac/tasks*\n"
+            md += "*none yet - save tools or scripts to ~/local/maxac/tasks*\n"
         else:
             for t in tasks:
                 md += f"- **{t}**\n"
@@ -1960,7 +1997,7 @@ class AgentCLI:
         return md
 
     def _mcp_status_markdown(self) -> str:
-        """Build a markdown MCP servers section string."""
+        # Build a markdown MCP servers section string.
         if not self.mcp_file or not self.mcp_file.exists():
             return ""
         
@@ -1980,11 +2017,11 @@ class AgentCLI:
         return md
 
     def _skills_markdown(self) -> str:
-        """Build a markdown skills section string."""
+        # Build a markdown skills section string
         skills = self.get_available_skills()
         md = "### Skills (Anthropic)\n"
         if not skills:
-            md += "*none yet — they are saved automatically on success*\n"
+            md += "*none yet - they are saved automatically on success*\n"
             return md
         for s in skills:
             md += f"- **{s['name']}**\n"
@@ -1993,11 +2030,11 @@ class AgentCLI:
         return md
 
     def _print_skills(self):
-        """Print a formatted list of Anthropic skills."""
+        # Print a formatted list of Anthropic skills
         self.out.markdown(self._skills_markdown())
 
     def _print_skill_detail(self, skill_name: str):
-        """Print raw skill data for debugging — no formatting."""
+        # Print raw skill data for debugging - no formatting.
         skill_dir = self._find_skill_dir(skill_name)
         if not skill_dir:
             self.out.fatal(f"skill '{skill_name}' not found")
@@ -2108,14 +2145,21 @@ def main():
             if len(args.set) == 0:
                 # Show current config values
                 agent.show_model_config()
-            elif len(args.set) == 2:
-                agent.set_model_config(args.set[0], args.set[1])
-                print(f"Set {args.set[0]} = {args.set[1]}")
-            else:
-                print("Usage: ac -s [KEY VALUE]")
+            elif len(args.set) % 2 != 0:
+                # Invalid number of arguments, must be pairs
+                print("Usage: ac -s [KEY VALUE] ...")
                 print("  (no args)  show current values")
                 print("  KEY VALUE  set a value (model, base_url, key)")
+                sys.exit(1)
+            else:
+                # Process multiple key-value pairs
+                for i in range(0, len(args.set), 2):
+                    key = args.set[i]
+                    value = args.set[i+1]
+                    agent.set_model_config(key, value)
+                    print(f"Set {key} = {value}")
             return
+
 
         # one-shot overrides
         if args.model:

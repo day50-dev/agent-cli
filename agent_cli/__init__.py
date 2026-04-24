@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,35 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import yaml
+
+# Configure structured logging for audit/diagnostic trail
+def _setup_logging(log_path: Optional[Path] = None) -> logging.Logger:
+    """Configure structured logging for diagnostic audit trail."""
+    logger = logging.getLogger("maxac")
+    logger.setLevel(logging.DEBUG)
+    
+    # Clear any existing handlers
+    logger.handlers.clear()
+    
+    # Console handler with structured format
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_format = logging.Formatter(
+        '%(asctime)s | %(level)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_format)
+    logger.addHandler(console_handler)
+    
+    # File handler for audit trail
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, mode='w')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(console_format)
+        logger.addHandler(file_handler)
+    
+    return logger
 
 try:
     from mcp import ClientSession, StdioServerParameters
@@ -371,6 +401,12 @@ class AgentCLI:
             "model": None,
             "key": None,
         }
+
+        # Initialize structured logging for audit trail
+        self.log = _setup_logging(self.config_dir / "last_run.log")
+        self.log.info("=" * 60)
+        self.log.info("MAXAC STARTED | config_dir=%s", self.config_dir)
+        self.log.info("=" * 60)
 
         self.out = Output(level=Output.DEBUG if verbose >= 2 else (Output.INFO if verbose >= 1 else Output.WARN),
                           log_path=self.config_dir / "last_run.log") # Log to a file in config dir
@@ -1336,19 +1372,24 @@ class AgentCLI:
 
         Returns (success, captured_output).
         """
+        skill_name = skill_meta.get('name', 'unknown')
+        self.log.info("APPLY_SKILL: skill=%s | task=%s", skill_name, task)
+        
         # Load full skill data from file
-        full = self._load_skill(skill_meta["name"])
+        full = self._load_skill(skill_name)
         if not full:
             # Fallback for just-imported skills that only have metadata
             full = skill_meta
 
         plan = full.get("plan", [])
+        self.log.info("APPLY_SKILL: skill=%s has %d plan steps", skill_name, len(plan))
         
         # If no plan exists, and we have a task, try to create one
         if not plan and task:
-            self.out.info(f"generating plan for skill '{skill_meta['name']}'...")
+            self.out.info(f"generating plan for skill '{skill_name}'...")
+            self.log.info("APPLY_SKILL: no existing plan, generating new one")
             # Include skill instructions in the task context
-            skill_dir = self._find_skill_dir(skill_meta["name"])
+            skill_dir = self._find_skill_dir(skill_name)
             context = task
             if skill_dir:
                 skill_md = skill_dir / "SKILL.md"
@@ -1357,10 +1398,12 @@ class AgentCLI:
             
             plan, success_condition = self._create_plan(context)
             if not plan:
+                self.log.error("APPLY_SKILL: plan generation failed")
                 return False, ""
             
             # Validate plan
             if not self._validate_plan(plan):
+                self.log.error("APPLY_SKILL: plan validation failed")
                 return False, ""
             
             # If this is a newly generated plan, we don't need parameter substitution
@@ -1369,6 +1412,7 @@ class AgentCLI:
             return await self._execute_plan(plan, task)
 
         if not plan:
+            self.log.warning("APPLY_SKILL: skill has no plan and no task provided")
             self.out.info("skill has no saved plan and no task provided to generate one")
             return False, ""
 
@@ -1799,17 +1843,23 @@ class AgentCLI:
     # ------------------------------------------------------------------
     async def _execute_plan(self, plan: list[dict], task: str) -> tuple[bool, str]:
         # Execute each plan step, returning (success, captured_output).
+        self.log.info("EXECUTE_PLAN: starting %d steps", len(plan))
         captured = []
+        
         for i, step in enumerate(plan):
-            self.out.section(f"execute  step {i + 1}: {step['action']}")
+            action = step.get('action', '?')
             tool = step.get("tool")
             args = step.get("args", [])
+            
+            self.log.info("EXECUTE_STEP %d: action=%s tool=%s args=%s", i+1, action, tool, args)
+            self.out.section(f"execute  step {i + 1}: {step['action']}")
 
             if tool:
                 task_path = self.tasks_dir / tool
                 if task_path.exists():
                     # Call Task Tool (saved script)
                     self.out.info(f"calling Task script: {tool}")
+                    self.log.info("TOOL_TYPE: task_script | path=%s", task_path)
                     # Ensure executable
                     if os.name != 'nt':
                         mode = os.stat(task_path).st_mode
@@ -1819,10 +1869,12 @@ class AgentCLI:
                     try:
                         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                         out = r.stdout + r.stderr
+                        self.log.info("TOOL_EXIT_CODE: %d", r.returncode)
                         for line in out.strip().splitlines():
                             self.out.output(line)
                         captured.append(out.strip())
                     except Exception as e:
+                        self.log.error("TOOL_ERROR: %s", e)
                         self.out.fatal(f"failed to run Task script '{tool}': {e}")
                         return False, ""
                 elif tool in self.mcp_tools:
@@ -1835,13 +1887,16 @@ class AgentCLI:
                             args = {}
                     
                     self.out.info(f"calling MCP tool: {tool}")
+                    self.log.info("TOOL_TYPE: mcp | tool=%s", tool)
                     out = await self._call_mcp_tool(tool, args)
                     for line in out.strip().splitlines():
                         self.out.output(line)
                     captured.append(out.strip())
                 else:
                     # System tool
+                    self.log.info("TOOL_TYPE: system | tool=%s", tool)
                     rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
+                    self.log.info("TOOL_EXIT_CODE: %d", rc)
                     if out.strip():
                         for line in out.strip().splitlines():
                             self.out.output(line)
@@ -1851,6 +1906,7 @@ class AgentCLI:
                             self.out.output(line)
                         captured.append(err.strip())
             else:
+                self.log.error("EXECUTE_STEP %d: NO_TOOL for action=%s", i+1, action)
                 self.out.fatal(f"no tool for step '{step['action']}' - cannot execute")
                 return False, ""
 
@@ -1861,31 +1917,47 @@ class AgentCLI:
     # ------------------------------------------------------------------
     async def execute_task(self, task: str, explicit_skill: str = None):
         async with self._mcp_context():
+            # Log the incoming task for audit
+            self.log.info("TASK RECEIVED: %s", task)
+            self.log.info("-" * 60)
+            
             # 1. Check for applicable skills
             self.out.section("Skills")
+            self.log.info("PHASE: SKILL_MATCH | action=checking_available_skills")
+            
             skill = None
             if explicit_skill:
+                self.log.info("PHASE: SKILL_MATCH | explicit_skill=%s", explicit_skill)
                 skill_dir = self._find_skill_dir(explicit_skill)
                 if not skill_dir:
+                    self.log.error("SKILL NOT FOUND: explicit_skill=%s", explicit_skill)
                     self.out.fatal(f"explicit skill '{explicit_skill}' not found")
                     sys.exit(1)
                 meta = self._parse_skill_md(skill_dir)
                 if not meta:
+                    self.log.error("SKILL INVALID: missing SKILL.md for %s", explicit_skill)
                     self.out.fatal(f"explicit skill '{explicit_skill}' missing SKILL.md metadata")
                     sys.exit(1)
                 skill = meta
                 self.out.info(f"using explicit skill: {skill['name']}")
+                self.log.info("PHASE: SKILL_MATCH | result=matched explicit_skill=%s", skill['name'])
             else:
                 skill = self._find_applicable_skill(task)
                 if skill:
+                    self.log.info("PHASE: SKILL_MATCH | result=matched skill=%s", skill['name'])
                     self.out.info(f"skill match: {skill['name']}")
+                else:
+                    self.log.info("PHASE: SKILL_MATCH | result=no_matching_skill")
 
             skill_success_condition = None
             if skill:
+                self.log.info("PHASE: APPLY_SKILL | skill=%s", skill['name'])
                 # 2. Apply skill - capture output for verification
                 self.out.section("Applying")
                 ok, captured = await self.apply_skill(skill, task=task)
+                
                 if ok:
+                    self.log.info("PHASE: APPLY_SKILL | result=executed_successfully")
                     # Load the skills saved success condition for verification
                     full_skill = self._load_skill(skill['name'])
                     skill_success_condition = full_skill.get("success_condition", "")
@@ -1897,61 +1969,90 @@ class AgentCLI:
                     for pname, pval in extracted.items():
                         skill_success_condition = skill_success_condition.replace(f"{{{{{pname}}}}}", pval)
 
+                    self.log.info("PHASE: VERIFY | success_condition=%s", skill_success_condition)
+
                     if skill_success_condition:
                         self.out.section("Verifying")
                         ok, result_summary = await self._verify_success(task, skill_success_condition, captured)
                         if ok:
+                            self.log.info("PHASE: VERIFY | result=satisfied")
                             self.out.separator()
                             if result_summary:
                                 self.out.result(result_summary)
                             self.out.info(skill_success_condition)
+                            self.log.info("=" * 60)
+                            self.log.info("TASK COMPLETED SUCCESSFULLY")
+                            self.log.info("=" * 60)
                             return
-                    else:
-                        # No saved condition - can't verify, assume ok
-                        self.out.separator()
-                        self.out.info(f"skill completed: {skill['name']}")
-                        return
+                        else:
+                            self.log.warning("PHASE: VERIFY | result=fAILED verification_failed")
+                else:
+                    self.log.warning("PHASE: APPLY_SKILL | result=execution_failed")
                 
                 if explicit_skill:
+                    self.log.error("PHASE: SKILL_FAILED | explicit_skill=%s failed_verification", explicit_skill)
                     # If explicit skill fails verification, we stop here.
                     self.out.fatal(f"explicit skill '{explicit_skill}' failed verification")
                     sys.exit(1)
 
+                # Log what failed for audit
+                self.log.warning("PHASE: FALLBACK | reason=skill_did_not_satisfy | skill_name=%s | skill_success_condition=%s", 
+                               skill.get('name', 'unknown'), skill_success_condition or '(none)')
+                self.log.info("PHASE: CREATE_PLAN | action=generating_new_plan")
                 self.out.warning("skill did not satisfy - falling back to plan")
             else:
+                self.log.info("PHASE: SKILL_MATCH | result=no_skill_found")
                 self.out.info("none found")
+                self.log.info("PHASE: CREATE_PLAN | action=generating_plan_from_scratch")
 
             # 3. Create plan + success condition via LLM
             self.out.section("plan")
+            self.log.info("PHASE: CREATE_PLAN | action=calling_llm_for_plan")
             plan, success_condition = self._create_plan(task)
+            self.log.info("PHASE: CREATE_PLAN | plan_steps=%d | success_condition=%s", len(plan), success_condition)
+            
             for i, step in enumerate(plan):
                 tool = step.get("tool", "(none)")
                 self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
+                self.log.info("  step %d: action=%s tool=%s args=%s", i+1, step.get('action'), tool, step.get('args'))
             self.out.info(f"success condition: {success_condition}")
 
             # 4. Validate plan (may rewrite tool names if alternatives are needed)
             self.out.section("validate")
+            self.log.info("PHASE: VALIDATE_PLAN | action=validating_tools")
             if not self._validate_plan(plan):
+                self.log.error("PHASE: VALIDATE_PLAN | result=failed")
                 self.out.fatal("validation failed")
                 sys.exit(1)
+            self.log.info("PHASE: VALIDATE_PLAN | result=all_valid")
             self.out.info("all steps valid")
 
             # Compute tools_in_plan AFTER validation so rewritten names are captured
             tools_in_plan = sorted({s["tool"] for s in plan if s.get("tool")})
+            self.log.info("PHASE: EXECUTE | tools_in_plan=%s", tools_in_plan)
 
             # 5. Execute - capture output
             self.out.section("execute")
+            self.log.info("PHASE: EXECUTE | action=running_steps")
             _, captured = await self._execute_plan(plan, task)
+            self.log.info("PHASE: EXECUTE | result=capture_complete")
 
             # 6. Verify against success condition & save skill
+            self.log.info("PHASE: VERIFY | success_condition=%s", success_condition)
             self.out.section("verify")
             verified, result_summary = await self._verify_success(task, success_condition, captured)
+            
             if verified:
+                self.log.info("PHASE: VERIFY | result=satisfied")
                 self.out.separator()
                 if result_summary:
                     self.out.result(result_summary)
                 skill_path = self._save_skill(task, plan, success_condition, tools_in_plan, success=True)
                 self.out.info(f"SUCCESS  {success_condition}")
+                self.log.info("=" * 60)
+                self.log.info("TASK COMPLETED SUCCESSFULLY")
+                self.log.info("skill saved: %s", Path(skill_path).name if skill_path else "(none)")
+                self.log.info("=" * 60)
                 if skill_path:
                     self.out.info(f"skill saved -> {Path(skill_path).name}")
             else:
@@ -1959,8 +2060,12 @@ class AgentCLI:
                     self.out.result(f"partial result: {result_summary}")
                 self._save_skill(task, plan, success_condition, tools_in_plan, success=False)
                 self.out.separator()
+                self.log.error("=" * 60)
+                self.log.error("TASK FAILED | success_condition=%s", success_condition)
+                self.log.error("=" * 60)
                 self.out.fatal(f"FAILED  {success_condition}")
                 log_file_path = self.out.save_log()
+                self.log.info("Log file saved: %s", log_file_path)
                 if log_file_path:
                     self.out.fatal(f"Log available at: {log_file_path}")
                 sys.exit(1)

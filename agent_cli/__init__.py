@@ -35,29 +35,27 @@ import yaml
 
 # Configure structured logging for audit/diagnostic trail
 def _setup_logging(log_path: Optional[Path] = None) -> logging.Logger:
-    """Configure structured logging for diagnostic audit trail."""
+    """Configure structured logging for diagnostic audit trail - logs go to file only."""
     logger = logging.getLogger("maxac")
     logger.setLevel(logging.DEBUG)
     
     # Clear any existing handlers
     logger.handlers.clear()
     
-    # Console handler with structured format
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
-    console_format = logging.Formatter(
-        '%(asctime)s | %(level)-8s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(console_format)
-    logger.addHandler(console_handler)
+    # Disable propagate to root - prevent duplicate output
+    logger.propagate = False
     
-    # File handler for audit trail
+    # File handler for audit trail ONLY - no console output
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_path, mode='w')
         file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(console_format)
+        # Detailed format with date, time, level, message
+        file_format = logging.Formatter(
+            '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(file_format)
         logger.addHandler(file_handler)
     
     return logger
@@ -2314,4 +2312,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Enable ctrl+c to work properly
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     main()

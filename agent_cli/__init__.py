@@ -48,14 +48,23 @@ def _setup_logging(log_path: Optional[Path] = None) -> logging.Logger:
     # File handler for audit trail ONLY - no console output
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_path, mode='w')
+        
+        # Create dated log filename: last_run-2026-04-23.log
+        dated_name = f"{log_path.stem}-{time.strftime('%Y-%m-%d')}{log_path.suffix}"
+        dated_path = log_path.parent / dated_name
+        
+        # If there's a previous run without today's date, rename it
+        if log_path.exists() and log_path != dated_path:
+            old_name = f"{log_path.stem}-old{log_path.suffix}"
+            old_path = log_path.parent / old_name
+            if old_path.exists():
+                old_path.unlink()  # Remove any stale old file
+            log_path.rename(old_path)
+        
+        file_handler = logging.FileHandler(dated_path, mode='w')
         file_handler.setLevel(logging.DEBUG)
-        # Detailed format with date, time, level, message
-        file_format = logging.Formatter(
-            '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(file_format)
+        # Simple default format - easy to scan
+        file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
         logger.addHandler(file_handler)
     
     return logger
@@ -1841,68 +1850,136 @@ class AgentCLI:
     # ------------------------------------------------------------------
     async def _execute_plan(self, plan: list[dict], task: str) -> tuple[bool, str]:
         # Execute each plan step, returning (success, captured_output).
+        # Steps can reference previous step results using {{step_N}} or {{results}}
+        # Steps can also CALL OTHER SKILLS by using "skill:skill_name" as the tool
         self.log.info("EXECUTE_PLAN: starting %d steps", len(plan))
         captured = []
+        step_outputs = {}  # Map step index -> output
         
         for i, step in enumerate(plan):
             action = step.get('action', '?')
             tool = step.get("tool")
             args = step.get("args", [])
             
+            # Support composable steps - substitute previous results
+            if isinstance(args, dict):
+                resolved_args = {}
+                for k, v in args.items():
+                    if isinstance(v, str):
+                        for step_idx in range(i):
+                            placeholder = f"{{{{step_{step_idx}}}}}"
+                            if placeholder in v:
+                                v = v.replace(placeholder, step_outputs.get(step_idx, ""))
+                        if "{{results}}" in v:
+                            v = v.replace("{{results}}", "\n".join(captured))
+                        if "{{last_output}}" in v:
+                            v = v.replace("{{last_output}}", captured[-1] if captured else "")
+                    resolved_args[k] = v
+                args = resolved_args
+            elif isinstance(args, list):
+                resolved_args = []
+                for arg in args:
+                    if isinstance(arg, str):
+                        for step_idx in range(i):
+                            placeholder = f"{{{{step_{step_idx}}}}}"
+                            if placeholder in arg:
+                                arg = arg.replace(placeholder, step_outputs.get(step_idx, ""))
+                            if "{{results}}" in arg:
+                                arg = arg.replace("{{results}}", "\n".join(captured))
+                            if "{{last_output}}" in arg:
+                                arg = arg.replace("{{last_output}}", captured[-1] if captured else "")
+                        resolved_args.append(arg)
+                    else:
+                        resolved_args.append(arg)
+                args = resolved_args
+            
             self.log.info("EXECUTE_STEP %d: action=%s tool=%s args=%s", i+1, action, tool, args)
             self.out.section(f"execute  step {i + 1}: {step['action']}")
 
             if tool:
-                task_path = self.tasks_dir / tool
-                if task_path.exists():
-                    # Call Task Tool (saved script)
-                    self.out.info(f"calling Task script: {tool}")
-                    self.log.info("TOOL_TYPE: task_script | path=%s", task_path)
-                    # Ensure executable
-                    if os.name != 'nt':
-                        mode = os.stat(task_path).st_mode
-                        os.chmod(task_path, mode | 0o111)
+                step_output = ""
+                
+                # Check if tool is actually calling another skill (prefix "skill:" or tool name matches a skill)
+                is_skill_call = False
+                skill_to_call = None
+                
+                if tool.startswith("skill:"):
+                    skill_to_call = tool[6:]  # Remove "skill:" prefix
+                    is_skill_call = True
+                elif self._find_skill_dir(tool):
+                    skill_to_call = tool
+                    is_skill_call = True
+                
+                if is_skill_call:
+                    # Call another skill as a function
+                    self.log.info("TOOL_TYPE: skill_call | skill=%s", skill_to_call)
+                    self.log.info("CALLING_SKILL: %s with args=%s", skill_to_call, args)
                     
-                    cmd = [str(task_path)] + args if isinstance(args, list) else [str(task_path)]
-                    try:
-                        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                        out = r.stdout + r.stderr
-                        self.log.info("TOOL_EXIT_CODE: %d", r.returncode)
-                        for line in out.strip().splitlines():
-                            self.out.output(line)
-                        captured.append(out.strip())
-                    except Exception as e:
-                        self.log.error("TOOL_ERROR: %s", e)
-                        self.out.fatal(f"failed to run Task script '{tool}': {e}")
+                    skill_meta = self._load_skill(skill_to_call)
+                    if not skill_meta:
+                        self.log.error("SKILL_NOT_FOUND: %s", skill_to_call)
+                        self.out.fatal(f"skill '{skill_to_call}' not found")
                         return False, ""
-                elif tool in self.mcp_tools:
-                    # Call MCP tool
-                    if not isinstance(args, dict):
-                        # If the LLM still provided a list for an MCP tool, we might need to handle it
-                        # but ideally it follows the new instructions.
-                        self.out.warn(f"MCP tool '{tool}' expects dict args, but got {type(args)}")
-                        if isinstance(args, list) and not args:
-                            args = {}
                     
-                    self.out.info(f"calling MCP tool: {tool}")
-                    self.log.info("TOOL_TYPE: mcp | tool=%s", tool)
-                    out = await self._call_mcp_tool(tool, args)
-                    for line in out.strip().splitlines():
-                        self.out.output(line)
-                    captured.append(out.strip())
+                    ok, skill_output = await self.apply_skill(skill_meta, task=None)
+                    if not ok:
+                        self.log.error("SKILL_FAILED: %s", skill_to_call)
+                        return False, ""
+                    
+                    step_output = skill_output
+                    captured.append(step_output.strip())
                 else:
-                    # System tool
-                    self.log.info("TOOL_TYPE: system | tool=%s", tool)
-                    rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
-                    self.log.info("TOOL_EXIT_CODE: %d", rc)
-                    if out.strip():
-                        for line in out.strip().splitlines():
+                    task_path = self.tasks_dir / tool
+                    if task_path.exists():
+                        # Call Task Tool (saved script)
+                        self.out.info(f"calling Task script: {tool}")
+                        self.log.info("TOOL_TYPE: task_script | path=%s", task_path)
+                        # Ensure executable
+                        if os.name != 'nt':
+                            mode = os.stat(task_path).st_mode
+                            os.chmod(task_path, mode | 0o111)
+                        
+                        cmd = [str(task_path)] + args if isinstance(args, list) else [str(task_path)]
+                        try:
+                            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                            step_output = r.stdout + r.stderr
+                            self.log.info("TOOL_EXIT_CODE: %d", r.returncode)
+                            for line in step_output.strip().splitlines():
+                                self.out.output(line)
+                            captured.append(step_output.strip())
+                        except Exception as e:
+                            self.log.error("TOOL_ERROR: %s", e)
+                            self.out.fatal(f"failed to run Task script '{tool}': {e}")
+                            return False, ""
+                    elif tool in self.mcp_tools:
+                        # Call MCP tool
+                        if not isinstance(args, dict):
+                            self.out.warn(f"MCP tool '{tool}' expects dict args, but got {type(args)}")
+                            if isinstance(args, list) and not args:
+                                args = {}
+                        
+                        self.out.info(f"calling MCP tool: {tool}")
+                        self.log.info("TOOL_TYPE: mcp | tool=%s", tool)
+                        step_output = await self._call_mcp_tool(tool, args)
+                        for line in step_output.strip().splitlines():
                             self.out.output(line)
-                        captured.append(out.strip())
-                    if err.strip():
-                        for line in err.strip().splitlines():
-                            self.out.output(line)
-                        captured.append(err.strip())
+                        captured.append(step_output.strip())
+                    else:
+                        # System tool
+                        self.log.info("TOOL_TYPE: system | tool=%s", tool)
+                        rc, out, err = self._run_symlinked(tool, args, timeout=300, show_cmd=True)
+                        self.log.info("TOOL_EXIT_CODE: %d", rc)
+                        if out.strip():
+                            for line in out.strip().splitlines():
+                                self.out.output(line)
+                            captured.append(out.strip())
+                            step_output = out.strip()
+                        if err.strip():
+                            for line in err.strip().splitlines():
+                                self.out.output(line)
+                            captured.append(err.strip())
+                # Store step output for composability
+                step_outputs[i] = step_output
             else:
                 self.log.error("EXECUTE_STEP %d: NO_TOOL for action=%s", i+1, action)
                 self.out.fatal(f"no tool for step '{step['action']}' - cannot execute")

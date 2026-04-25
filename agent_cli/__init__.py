@@ -1990,7 +1990,7 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    async def execute_task(self, task: str, explicit_skill: str = None):
+    async def execute_task(self, task: str, explicit_skill: str = None, preview: bool = False):
         async with self._mcp_context():
             # Log the incoming task for audit
             self.log.info("TASK RECEIVED: %s", task)
@@ -2086,6 +2086,62 @@ class AgentCLI:
             plan, success_condition = self._create_plan(task)
             self.log.info("PHASE: CREATE_PLAN | plan_steps=%d | success_condition=%s", len(plan), success_condition)
             
+            # Show plan to user
+            print("\n" + "="*60)
+            print("PLAN PREVIEW")
+            print("="*60)
+            print(f"Task: {task}\n")
+            print(f"Success condition: {success_condition}\n")
+            print("Steps:")
+            for i, step in enumerate(plan):
+                tool = step.get("tool", "(none)")
+                args = step.get("args", [])
+                print(f"  {i+1}. {step.get('action')}")
+                print(f"     tool: {tool}")
+                print(f"     args: {args}")
+            print("="*60)
+            
+            if preview:
+                while True:
+                    print("\n(c)ontinue, (e)dit plan, (r)etry, (a)bort? ", end="")
+                    choice = input().strip().lower()
+                    if choice == 'a':
+                        print("Aborted.")
+                        self.log.info("PREVIEW: user aborted")
+                        sys.exit(0)
+                    elif choice == 'c':
+                        print("Executing...")
+                        break
+                    elif choice == 'r':
+                        print("Retrying...")
+                        self.log.info("PREVIEW: user chose retry")
+                        # Retry = create new plan
+                        plan, success_condition = self._create_plan(task)
+                        self.log.info("PHASE: CREATE_PLAN | plan_steps=%d | success_condition=%s", len(plan), success_condition)
+                        print("\nNew plan:")
+                        for i, step in enumerate(plan):
+                            tool = step.get("tool", "(none)")
+                            print(f"  {i+1}. {step.get('action')} ({tool})")
+                    elif choice == 'e':
+                        print("Edit plan - this will open your editor with the JSON plan.")
+                        print("After editing, the plan will be re-validated.")
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                            json.dump({"plan": plan, "success_condition": success_condition}, f, indent=2)
+                            temp_path = f.name
+                        editor = os.environ.get('EDITOR', 'vi')
+                        subprocess.run([editor, temp_path])
+                        with open(temp_path) as f:
+                            edited = json.load(f)
+                        os.unlink(temp_path)
+                        plan = edited.get("plan", plan)
+                        success_condition = edited.get("success_condition", success_condition)
+                        print("Plan updated.")
+                        self.log.info("PREVIEW: user edited plan")
+                    else:
+                        print("Invalid choice. c/e/r/a")
+            
+            # Continue with normal flow after preview (or skip if not preview)
             for i, step in enumerate(plan):
                 tool = step.get("tool", "(none)")
                 self.out.info(f"step {i + 1}: {step['action']}  ({tool})")
@@ -2261,6 +2317,10 @@ def main():
         "-v", "--verbose", action="count", default=0,
         help="Increase verbosity: -v shows sections/steps, -vv shows all tool output",
     )
+    task_group.add_argument(
+        "-p", "--preview", action="store_true",
+        help="Preview the plan before execution (confirm, edit, retry, or abort)",
+    )
 
     # Model Configuration
     model_group = parser.add_argument_group("Model Configuration")
@@ -2362,7 +2422,7 @@ def main():
             task = path.read_text().strip()
 
         if task:
-            asyncio.run(agent.execute_task(task, explicit_skill=args.skill))
+            asyncio.run(agent.execute_task(task, explicit_skill=args.skill, preview=args.preview))
         elif args.skills:
             if args.skills == "__all__":
                 agent._print_skills()

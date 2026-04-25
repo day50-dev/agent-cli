@@ -2086,19 +2086,19 @@ class AgentCLI:
             plan, success_condition = self._create_plan(task)
             self.log.info("PHASE: CREATE_PLAN | plan_steps=%d | success_condition=%s", len(plan), success_condition)
             
-            # Show plan to user
+            # Show plan to user in markdown format
             print("\n" + "="*60)
             print("PLAN PREVIEW")
             print("="*60)
-            print(f"Task: {task}\n")
-            print(f"Success condition: {success_condition}\n")
-            print("Steps:")
+            print(f"**Task:** {task}\n")
+            print(f"**Success condition:** {success_condition}\n")
+            print("**Steps:**")
             for i, step in enumerate(plan):
                 tool = step.get("tool", "(none)")
                 args = step.get("args", [])
-                print(f"  {i+1}. {step.get('action')}")
-                print(f"     tool: {tool}")
-                print(f"     args: {args}")
+                print(f"- Step {i+1}: **{step.get('action')}**")
+                print(f"  - tool: `{tool}`")
+                print(f"  - args: {args}")
             print("="*60)
             
             if preview:
@@ -2123,16 +2123,18 @@ class AgentCLI:
                             tool = step.get("tool", "(none)")
                             print(f"  {i+1}. {step.get('action')} ({tool})")
                     elif choice == 'e':
-                        print("Edit plan - this will open your editor with the JSON plan.")
+                        print("Edit plan - this will open your editor with the YAML plan.")
                         print("After editing, the plan will be re-validated.")
                         import tempfile
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                            json.dump({"plan": plan, "success_condition": success_condition}, f, indent=2)
+                        # Use YAML for editing - more readable
+                        edited_content = yaml.dump({"plan": plan, "success_condition": success_condition}, default_flow_style=False)
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                            f.write(edited_content)
                             temp_path = f.name
                         editor = os.environ.get('EDITOR', 'vi')
                         subprocess.run([editor, temp_path])
                         with open(temp_path) as f:
-                            edited = json.load(f)
+                            edited = yaml.safe_load(f)
                         os.unlink(temp_path)
                         plan = edited.get("plan", plan)
                         success_condition = edited.get("success_condition", success_condition)

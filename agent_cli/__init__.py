@@ -93,66 +93,6 @@ DEFAULT_TOOLS = {
     "find": ["cat", "head", "tail", "ls"],
 }
 
-# Tool name -> task category classification.
-# Used to decide where a newly discovered tool gets symlinked.
-TOOL_TASK_CLASSIFIER = {
-    # version control
-    "git": "vcs",
-    "gh": "vcs",
-    "hub": "vcs",
-    "svn": "vcs",
-    "hg": "vcs",
-    # build / package
-    "make": "build",
-    "cmake": "build",
-    "cargo": "build",
-    "npm": "build",
-    "pip": "build",
-    "yarn": "build",
-    "go": "build",
-    "maven": "build",
-    "gradle": "build",
-    # text / data processing
-    "grep": "find",
-    "awk": "text",
-    "sed": "text",
-    "jq": "text",
-    "sort": "text",
-    "cut": "text",
-    "wc": "text",
-    # network / download
-    "curl": "net",
-    "wget": "net",
-    "ssh": "net",
-    "scp": "net",
-    "rsync": "net",
-    # system / info
-    "uname": "sys",
-    "df": "sys",
-    "du": "sys",
-    "ps": "sys",
-    "top": "sys",
-    "htop": "sys",
-    # docs (expand beyond the defaults)
-    "info": "doc",
-    "help": "doc",
-}
-
-
-def classify_tool(name: str) -> str:
-    """Return the task category for a tool name. Falls back to 'general'."""
-    return TOOL_TASK_CLASSIFIER.get(name, "general")
-
-
-# ANSI escape codes - module-level for use by Spinner animation.
-_ANSI_BOLD   = "\033[1m"
-_ANSI_DIM    = "\033[2m"
-_ANSI_RESET  = "\033[0m"
-_ANSI_GREEN  = "\033[32m"
-_ANSI_RED    = "\033[31m"
-_ANSI_YELLOW = "\033[33m"
-_ANSI_CYAN   = "\033[36m"
-_ANSI_BLUE   = "\033[34m"
 
 # ------------------------------------------------------------------
 # Markdown helpers
@@ -597,6 +537,46 @@ class AgentCLI:
             names.update(task_tools)
         return names
 
+    def get_existing_categories(self) -> list[str]:
+        """Return list of existing tool categories (subdirs in tools/)."""
+        if not self.tools_dir.exists():
+            return []
+        return sorted([
+            d.name for d in self.tools_dir.iterdir()
+            if d.is_dir() and (d / "bin").exists()
+        ])
+
+    def classify_tool(self, name: str) -> str:
+        """Ask the LLM to classify a tool into a task category.
+        
+        Uses existing categories as hints, but allows the LLM to create new ones.
+        Returns a category name (filesystem-safe).
+        """
+        existing = self.get_existing_categories()
+        categories_str = ", ".join(existing) if existing else "none yet"
+        
+        system_prompt = (
+            "You are a tool classification expert. Classify a Unix tool into a task category "
+            "(e.g. vcs, build, text, net, sys, doc) or create a new category if none fit. "
+            "Respond ONLY with a short category name (lowercase, alphanumeric hyphens allowed), "
+            "or 'general' if truly unsure.\n\n"
+            f"Existing categories: {categories_str}"
+        )
+        user_prompt = (
+            f"Tool to classify: {name}\n"
+            "What category best describes this tool's purpose?"
+        )
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        if not result:
+            return "general"
+        
+        result = result.strip().lower()
+        result = re.sub(r'[^a-z0-9-]', '', result)[:30] or "general"
+        return result
+
     # ------------------------------------------------------------------
     # Discovery via the minimal tool set
     # ------------------------------------------------------------------
@@ -725,7 +705,7 @@ class AgentCLI:
         Symlink a system binary into our tools directory after user
         confirmation.  Returns True on success.
 
-        If *task* is None the tool is auto-classified via TOOL_TASK_CLASSIFIER.
+        If *task* is None the tool is auto-classified by the LLM.
         """
         if name in self.all_tool_names():
             return True
@@ -736,7 +716,7 @@ class AgentCLI:
             return False
 
         if task is None:
-            task = classify_tool(name)
+            task = self.classify_tool(name)
 
         task_bin = self.tools_dir / task / "bin"
         task_bin.mkdir(parents=True, exist_ok=True)
@@ -2103,9 +2083,14 @@ class AgentCLI:
             
             if preview:
                 while True:
-                    print("\n(c)ontinue, (e)dit plan, (r)etry, (a)bort? ", end="")
-                    choice = input().strip().lower()
-                    if choice == 'a':
+                    print("\n(c)ontinue, (e)dit plan, (r)etry, (a)dd step, (q)uit? ", end="")
+                    try:
+                        choice = input().strip().lower()
+                    except KeyboardInterrupt:
+                        print("\nAborted.")
+                        self.log.info("PREVIEW: user aborted (Ctrl+C)")
+                        sys.exit(0)
+                    if choice == 'q':
                         print("Aborted.")
                         self.log.info("PREVIEW: user aborted")
                         sys.exit(0)
@@ -2140,8 +2125,25 @@ class AgentCLI:
                         success_condition = edited.get("success_condition", success_condition)
                         print("Plan updated.")
                         self.log.info("PREVIEW: user edited plan")
+                    elif choice == 'a' or choice == 'add':
+                        # Add a new step
+                        print("\nAdd a new step:")
+                        action = input("  action (e.g. fetch_url): ").strip()
+                        tool = input("  tool (e.g. curl, web_search skill): ").strip()
+                        args_str = input("  args (JSON format, e.g. {'url': 'example.com'}): ").strip()
+                        try:
+                            args = json.loads(args_str) if args_str else {}
+                        except json.JSONDecodeError:
+                            args = {"note": args_str}
+                        plan.append({"action": action, "tool": tool, "args": args})
+                        print(f"Added: {action} -> {tool}")
+                        self.log.info("PREVIEW: user added step: %s -> %s", action, tool)
+                        print("\nUpdated plan:")
+                        for i, step in enumerate(plan):
+                            t = step.get("tool", "(none)")
+                            print(f"  {i+1}. {step.get('action')} ({t})")
                     else:
-                        print("Invalid choice. c/e/r/a")
+                        print("Invalid choice. c/e/r/a/q")
             
             # Continue with normal flow after preview (or skip if not preview)
             for i, step in enumerate(plan):

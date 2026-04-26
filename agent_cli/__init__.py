@@ -291,21 +291,16 @@ class Spinner:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
-    # ---- colour helpers (uses module-level ANSI codes) ----
+    # ---- colour helpers (no-op - no ANSI codes) ----
 
     def _c(self, code: str, text: str) -> str:
-        if self._no_tty:
-            return text
-        return f"{code}{text}{_ANSI_RESET}"
+        return text
 
     def _spin(self):
         idx = 0
         while not self._stop.is_set():
             frame = self._FRAMES[idx % len(self._FRAMES)]
-            dim_label = self._c(_ANSI_DIM, self._label)
-            colored_frame = self._c(_ANSI_CYAN, frame)
-            # \r returns to column 0; \033[?25l hides cursor
-            sys.stdout.write(f"\r  {colored_frame} {dim_label}…\033[?25l")
+            sys.stdout.write(f"\r  {frame} {self._label}…\033[?25l")
             sys.stdout.flush()
             self._stop.wait(self._INTERVAL)
             idx += 1
@@ -344,7 +339,7 @@ class AgentCLI:
         self.mcp_file = mcp_file or (self.config_dir / "mcp_servers.json")
 
         self.model_config = {
-            "base_url": None,
+            "url": None,
             "model": None,
             "key": None,
         }
@@ -1735,24 +1730,24 @@ class AgentCLI:
     # ------------------------------------------------------------------
     # LLM inference
     # ------------------------------------------------------------------
-    def _resolve_base_url(self) -> str:
+    def _resolve_url(self) -> str:
         """Return a base URL that includes the /v1 (or /vN) API version prefix.
 
         Most OpenAI-compatible providers expect paths like /v1/chat/completions.
-        If the users base_url already ends with a version segment (e.g. /v1,
+        If the users url already ends with a version segment (e.g. /v1,
         /v2, /v1beta), its kept as-is.  Otherwise /v1 is appended automatically.
         """
-        base_url = self.model_config.get("base_url") or "https://api.openai.com/v1"
-        base_url = base_url.rstrip('/')
+        url = self.model_config.get("url") or "https://api.openai.com/v1"
+        url = url.rstrip('/')
         # Already has a versioned path segment like /v1, /v2, /v1beta, etc.
-        if re.search(r'/v\d+(?:[a-z]*)?$', base_url):
-            return base_url
-        return f"{base_url}/v1"
+        if re.search(r'/v\d+(?:[a-z]*)?$', url):
+            return url
+        return f"{url}/v1"
 
     def list_models(self):
         """Query the /models endpoint and display available models."""
-        base_url = self._resolve_base_url()
-        url = f"{base_url}/models"
+        url = self._resolve_url()
+        url = f"{url}/models"
 
         import urllib.error
         import urllib.request
@@ -1761,7 +1756,7 @@ class AgentCLI:
             headers["Authorization"] = f"Bearer {self.model_config['key']}"
         req = urllib.request.Request(url, headers=headers)
         try:
-            with self.out.spinner(f"Fetching models from {base_url}"):
+            with self.out.spinner(f"Fetching models from {url}"):
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
@@ -1785,7 +1780,7 @@ class AgentCLI:
             self.out.info(f"no models returned from {url}")
             return
 
-        md = f"### Models at {base_url}\n"
+        md = f"### Models at {url}\n"
         for m in sorted(models, key=lambda x: x.get("id", "")):
             mid = m.get("id", "?")
             owner = m.get("owned_by", "")
@@ -1832,8 +1827,8 @@ class AgentCLI:
         import urllib.error
         import urllib.request
 
-        base_url = self._resolve_base_url()
-        url = f"{base_url}/chat/completions"
+        url = self._resolve_url()
+        url = f"{url}/chat/completions"
 
         model_name = self.model_config.get("model", "")
         payload = {
@@ -2514,10 +2509,10 @@ def main():
     model_group = parser.add_argument_group("Model Configuration")
     model_group.add_argument(
         "-s", "--set", nargs="*", metavar=("KEY", "VALUE"),
-        help="Set a model config value (model, base_url, key), or show current values with no args",
+        help="Set a model config value (model, url, key), or show current values with no args",
     )
     model_group.add_argument("-m", "--model", nargs="?", const="__list__", help="Override model for this run; with no value, list available models")
-    model_group.add_argument("-b", "--base-url", help="Override base_url for this run")
+    model_group.add_argument("-u", "--url", help="Override url for this run")
     model_group.add_argument("-k", "--key", help="Override API key for this run")
     model_group.add_argument(
         "--curlify", action="store_true",
@@ -2581,7 +2576,7 @@ def main():
                 # Invalid number of arguments, must be pairs
                 print("Usage: ac -s [KEY VALUE] ...")
                 print("  (no args)  show current values")
-                print("  KEY VALUE  set a value (model, base_url, key)")
+                print("  KEY VALUE  set a value (model, url, key)")
                 sys.exit(1)
             else:
                 # Process multiple key-value pairs
@@ -2599,8 +2594,8 @@ def main():
                 agent.list_models()
                 return
             agent.model_config["model"] = args.model
-        if args.base_url:
-            agent.model_config["base_url"] = args.base_url
+        if args.url:
+            agent.model_config["url"] = args.url
         if args.key:
             agent.model_config["key"] = args.key
 

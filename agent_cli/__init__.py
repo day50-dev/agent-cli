@@ -1066,6 +1066,70 @@ class AgentCLI:
             result = result.replace(orig, f"{{{{{param_name}}}}}")
         return result
 
+    def _find_similar_skills(self, plan: list[dict], threshold: float = 0.6) -> list[dict]:
+        """Find skills with similar plan structure using the LLM.
+        
+        Returns list of {name, description, similarity} dicts for skills
+        with similarity >= threshold (0.0 to 1.0).
+        """
+        existing = self.get_available_skills()
+        if not existing:
+            return []
+        
+        new_plan_summary = ", ".join([
+            f"{s.get('action', '?')} using {s.get('tool', '?')}"
+            for s in plan
+        ])
+        
+        for s in existing:
+            exist_plan = s.get("tools_used", [])
+            exist_summary = ", ".join([
+                f"{t}" for t in exist_plan
+            ])
+        
+        prompts = []
+        for s in existing:
+            exist_plan = s.get("tools_used", [])
+            exist_summary = ", ".join(exist_plan) if exist_plan else "(no tools)"
+            prompts.append({
+                "skill_name": s["name"],
+                "existing_summary": exist_summary,
+            })
+        
+        if not prompts:
+            return []
+        
+        system_prompt = (
+            "You are a skill similarity detector. Compare the new skill plan with each existing skill. "
+            "Rate similarity from 0.0 (completely different) to 1.0 (essentially identical). "
+            "Consider: same tools, similar sequence, similar purpose. "
+            "Respond ONLY with valid JSON array of {skill_name, similarity} objects:\n"
+            "[{skill_name: \"name1\", similarity: 0.85}, {skill_name: \"name2\", similarity: 0.2}]"
+        )
+        user_prompt = (
+            f"New skill plan: {new_plan_summary}\n\n"
+            f"Existing skills:\n{json.dumps(prompts, indent=2)}"
+        )
+        
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        if not result:
+            return []
+        
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r'^```(?:json)?\n?', '', result)
+            result = re.sub(r'\n?```$', '', result)
+            result = result.strip()
+        
+        try:
+            parsed = json.loads(result)
+            return [p for p in parsed if p.get("similarity", 0) >= threshold]
+        except json.JSONDecodeError:
+            return []
+
     def _save_skill(self, task: str, plan: list[dict], success_condition: str,
                     tools_used: list[str], success: bool = True) -> Optional[str]:
         """Persist the completed task as a reusable, parameterized skill.
@@ -1084,6 +1148,25 @@ class AgentCLI:
         # Generate skill name and parameterize plan via LLM
         skill_name, param_plan, params_map = self._analyze_plan(task, plan)
         skill_dir = self.skills_dir / skill_name
+
+        # Check for similar existing skills BEFORE saving (unless auto_yes)
+        if not self.auto_yes:
+            similar = self._find_similar_skills(plan)
+            if similar:
+                self.out.warning(f"Similar skills found:")
+                for s in similar:
+                    self.out.sublist(f"{s['name']} (similarity: {s['similarity']:.0%})")
+                self.out.prompt("Save as new skill anyway (y/n), or enter skill name to update? ", end="")
+                resp = sys.stdin.readline().strip()
+                if resp.lower() == "n":
+                    self.out.info("skill not saved")
+                    return None
+                if resp and resp != skill_name:
+                    # User wants to update an existing skill
+                    alt_dir = self.skills_dir / resp
+                    if alt_dir.exists():
+                        skill_dir = alt_dir
+                        skill_name = resp
 
         # If skill directory already exists, check plan compatibility
         plan_file = skill_dir / "plan.json"
@@ -1203,6 +1286,107 @@ class AgentCLI:
         shutil.rmtree(skill_dir)
         self.out.success(f"skill '{skill_name}' deleted")
         return True
+
+    def clean_skills(self) -> None:
+        """Review skills, find similar ones, and let user merge/delete interactively."""
+        skills = self.get_available_skills()
+        if len(skills) < 2:
+            self.out.info("No review needed - only one skill exists")
+            return
+        
+        self.out.headline("Skill Review")
+        
+        # Find similar skill pairs using LLM
+        skill_names = [s["name"] for s in skills]
+        skill_summaries = []
+        for s in skills:
+            tools = s.get("tools_used", [])
+            desc = s.get("description", "(no description)")
+            skill_summaries.append({
+                "name": s["name"],
+                "tools": ", ".join(tools) if tools else "none",
+                "description": desc,
+            })
+        
+        self.out.info(f"Analyzing {len(skills)} skills for similarity...")
+        
+        system_prompt = (
+            "You are a skill similarity analyzer. Find all pairs of skills that are similar (≥60% similar). "
+            "Similar skills share the same tools, have similar purposes, or could be consolidated. "
+            "Respond ONLY with valid JSON array of {skill1, skill2, similarity, reason} objects:\n"
+            "[{skill1: \"a\", skill2: \"b\", similarity: 0.85, reason: \"both do web research\"}]"
+        )
+        user_prompt = (
+            f"Skills to analyze:\n{json.dumps(skill_summaries, indent=2)}"
+        )
+        
+        result = self._call_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        
+        similar_pairs = []
+        if result:
+            try:
+                if result.startswith("```"):
+                    result = re.sub(r'^```(?:json)?\n?', '', result)
+                    result = re.sub(r'\n?```$', '', result).strip()
+                parsed = json.loads(result)
+                similar_pairs = [p for p in parsed if p.get("similarity", 0) >= 0.6]
+            except (json.JSONDecodeError, ValueError):
+                pass
+        
+        if not similar_pairs:
+            self.out.success("No similar skills found - all look distinct!")
+            return
+        
+        self.out.warning(f"Found {len(similar_pairs)} similar skill pairs:")
+        for pair in similar_pairs:
+            self.out.kv(f"{pair['skill1']} ↔ {pair['skill2']}", f"{pair['similarity']:.0%}: {pair.get('reason', '')}")
+        
+        # Let user decide what to do with each similar pair
+        for pair in similar_pairs:
+            s1, s2 = pair["skill1"], pair["skill2"]
+            sim = pair["similarity"]
+            
+            self.out.prompt(f"\n[{s1}] ↔ [{s2}] ({sim:.0%} similar)\n", end="")
+            self.out.prompt(f"  [k]eep both, [m]erge into one, [d]elete one, or [s]kip? ", end="")
+            resp = sys.stdin.readline().strip().lower()
+            
+            if resp == "m":
+                # Merge: ask which one to keep
+                self.out.prompt(f"  Keep which name? [{s1}/{s2}]: ", end="")
+                keep = sys.stdin.readline().strip() or s1
+                other = s2 if keep == s1 else s1
+                
+                keep_dir = self.skills_dir / keep
+                other_dir = self.skills_dir / other
+                
+                # Update plan.json to note the merge
+                plan_file = keep_dir / "plan.json"
+                if plan_file.exists():
+                    try:
+                        with open(plan_file) as fh:
+                            data = json.load(fh)
+                        data["merged_from"] = other
+                        data["success_count"] = data.get("success_count", 1)
+                        with open(plan_file, "w") as fh:
+                            json.dump(data, fh, indent=2)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                
+                # Delete the other
+                shutil.rmtree(other_dir)
+                self.out.success(f"merged '{other}' into '{keep}'")
+            elif resp == "d":
+                self.out.prompt(f"  Delete which? [{s1}/{s2}]: ", end="")
+                delete = sys.stdin.readline().strip()
+                if delete in [s1, s2]:
+                    self.delete_skill(delete)
+            elif resp == "k" or resp == "s" or not resp:
+                self.out.info("kept both")
+        
+        self.out.success("Review complete!")
 
     def edit_task(self, task_name: str) -> bool:
         """Open a task script in the users default editor."""
@@ -2366,6 +2550,10 @@ def main():
         help="Delete a saved skill so it won't be used and must be re-learned",
     )
     skill_group.add_argument(
+        "--clean", action="store_true",
+        help="Review and deduplicate similar skills interactively",
+    )
+    skill_group.add_argument(
         "--import", dest="import_path", metavar="PATH",
         help="Import a skill from a directory, SKILL.md file, or .skill archive",
     )
@@ -2436,6 +2624,8 @@ def main():
             agent.edit_task(args.edit)
         elif args.delete:
             agent.delete_skill(args.delete)
+        elif args.clean:
+            agent.clean_skills()
         elif args.import_path:
             agent.import_skill(args.import_path)
         elif args.export:
@@ -2447,9 +2637,6 @@ def main():
     except KeyboardInterrupt:
         print()
         sys.exit(130)
-    except Exception as e:
-        agent.out.fatal(str(e))
-        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -354,6 +354,7 @@ class AgentCLI:
                           log_path=self.config_dir / "last_run.log") # Log to a file in config dir
         self._skills_migrated = False
         self._curlify_mode = False
+        self._timeout = 120
 
         self.mcp_sessions: Dict[str, Any] = {} # server_name -> session
         self.mcp_tools: Dict[str, Any] = {}    # tool_name -> (server_name, tool_info)
@@ -1757,7 +1758,7 @@ class AgentCLI:
         req = urllib.request.Request(url, headers=headers)
         try:
             with self.out.spinner(f"Fetching models from {url}"):
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             body = ""
@@ -1853,7 +1854,7 @@ class AgentCLI:
 
         try:
             with self.out.spinner("Thinking"):
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     result = json.loads(resp.read())
                     return result["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
@@ -2515,6 +2516,10 @@ def main():
     model_group.add_argument("-u", "--url", help="Override url for this run")
     model_group.add_argument("-k", "--key", help="Override API key for this run")
     model_group.add_argument(
+        "-T", "--timeout", type=int, default=120,
+        help="Timeout for API calls in seconds (default: 120)",
+    )
+    model_group.add_argument(
         "--curlify", action="store_true",
         help="Print the curl equivalent of the model API call for debugging",
     )
@@ -2565,6 +2570,7 @@ def main():
         mcp_file=args.mcp_file
     )
     agent._curlify_mode = args.curlify
+    agent._timeout = args.timeout
 
     try:
         # --set

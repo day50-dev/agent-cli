@@ -16,6 +16,8 @@ Agent flow:
 6. If more tools needed, ask user to allow/install them; otherwise execute
 """
 
+import time
+start=time.time()
 import argparse
 import asyncio
 import contextlib
@@ -68,13 +70,6 @@ def _setup_logging(log_path: Optional[Path] = None) -> logging.Logger:
         logger.addHandler(file_handler)
     
     return logger
-
-try:
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    HAS_MCP = True
-except ImportError:
-    HAS_MCP = False
 
 
 # Default configuration - lives under site.USER_BASE (~/.local on Linux,
@@ -432,8 +427,6 @@ class AgentCLI:
 
     async def _connect_mcp(self):
         """Connect to MCP servers defined in mcp_file."""
-        if not HAS_MCP:
-            return
         if not self.mcp_file or not self.mcp_file.exists():
             return
 
@@ -1285,7 +1278,10 @@ class AgentCLI:
 
     def clean_skills(self) -> None:
         """Review skills, find similar ones, and let user merge/delete interactively."""
+        self.log.info("CLEAN_SKILLS: starting")
         skills = self.get_available_skills()
+        self.log.info("CLEAN_SKILLS: found %d skills", len(skills))
+        
         if len(skills) < 2:
             self.out.info("No review needed - only one skill exists")
             return
@@ -1305,6 +1301,7 @@ class AgentCLI:
             })
         
         self.out.info(f"Analyzing {len(skills)} skills for similarity...")
+        self.log.info("CLEAN_SKILLS: calling LLM for similarity analysis")
         
         system_prompt = (
             "You are a skill similarity analyzer. Find all pairs of skills that are similar (≥60% similar). "
@@ -1321,6 +1318,8 @@ class AgentCLI:
             {"role": "user", "content": user_prompt},
         ])
         
+        self.log.info("CLEAN_SKILLS: _call_model returned: %s", result[:200] if result else "None")
+        
         similar_pairs = []
         if result:
             try:
@@ -1329,8 +1328,11 @@ class AgentCLI:
                     result = re.sub(r'\n?```$', '', result).strip()
                 parsed = json.loads(result)
                 similar_pairs = [p for p in parsed if p.get("similarity", 0) >= 0.6]
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError) as e:
+                self.log.error("CLEAN_SKILLS: JSON parse error: %s", e)
                 pass
+        else:
+            self.log.warning("CLEAN_SKILLS: _call_model returned None")
         
         if not similar_pairs:
             self.out.success("No similar skills found - all look distinct!")
@@ -1863,12 +1865,14 @@ class AgentCLI:
                 body = e.read().decode()[:500]
             except Exception:
                 pass
+            self.log.error("CLEAN_SKILLS: HTTPError %s %s", e.code, e.reason)
             self.out.fatal(f"model call failed: HTTP {e.code} {e.reason}")
             self._print_api_diagnostics(url)
             if body:
                 self.out.kv("response", body)
             return None
         except Exception as e:
+            self.log.error("CLEAN_SKILLS: Exception: %s", e)
             self.out.fatal(f"model call failed: {e}")
             self._print_api_diagnostics(url)
             return None
@@ -2571,29 +2575,31 @@ def main():
     )
     agent._curlify_mode = args.curlify
     agent._timeout = args.timeout
+    
+    # Handle CLI-only options first (these don't need full agent)
+    if args.set is not None:
+        if len(args.set) == 0:
+            # Show current config values
+            agent.show_model_config()
+        elif len(args.set) % 2 != 0:
+            # Invalid number of arguments, must be pairs
+            print("Usage: ac -s [KEY VALUE] ...")
+            print("  (no args)  show current values")
+            print("  KEY VALUE  set a value (model, url, key)")
+            sys.exit(1)
+        else:
+            # Process multiple key-value pairs
+            for i in range(0, len(args.set), 2):
+                key = args.set[i]
+                value = args.set[i+1]
+                agent.set_model_config(key, value)
+                print(f"Set {key} = {value}")
+        return
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
 
     try:
-        # --set
-        if args.set is not None:
-            if len(args.set) == 0:
-                # Show current config values
-                agent.show_model_config()
-            elif len(args.set) % 2 != 0:
-                # Invalid number of arguments, must be pairs
-                print("Usage: ac -s [KEY VALUE] ...")
-                print("  (no args)  show current values")
-                print("  KEY VALUE  set a value (model, url, key)")
-                sys.exit(1)
-            else:
-                # Process multiple key-value pairs
-                for i in range(0, len(args.set), 2):
-                    key = args.set[i]
-                    value = args.set[i+1]
-                    agent.set_model_config(key, value)
-                    print(f"Set {key} = {value}")
-            return
-
-
         # one-shot overrides
         if args.model:
             if args.model == "__list__":

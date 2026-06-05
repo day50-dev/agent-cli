@@ -1150,7 +1150,7 @@ class AgentCLI:
             if similar:
                 self.out.warning(f"Similar skills found:")
                 for s in similar:
-                    self.out.sublist(f"{s['name']} (similarity: {s['similarity']:.0%})")
+                    self.out.sublist(f"{s.get('skill_name', s.get('name', '?'))} (similarity: {s.get('similarity', 0):.0%})")
                 self.out.prompt("Save as new skill anyway (y/n), or enter skill name to update? ", end="")
                 resp = sys.stdin.readline().strip()
                 if resp.lower() == "n":

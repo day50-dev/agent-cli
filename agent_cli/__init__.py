@@ -35,6 +35,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 import yaml
 
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
 # Configure structured logging for audit/diagnostic trail
 def _setup_logging(log_path: Optional[Path] = None) -> logging.Logger:
     """Configure structured logging for diagnostic audit trail - logs go to file only."""
@@ -153,7 +156,10 @@ class Output:
         """Render a markdown fragment through streamdown, or fall back to print."""
         self._log(text) # Always log the text
         if self._sd:
-            self._sd.render(text)
+            try:
+                self._sd.render(text)
+            except Exception:
+                pass
         else:
             # Fallback: strip basic markdown for plain-text display
             clean = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -2539,6 +2545,17 @@ def main():
         help=f"Override default MCP servers config file",
     )
 
+    # Serve (web interface)
+    serve_group = parser.add_argument_group("Web Interface")
+    serve_group.add_argument(
+        "--port", type=int, default=8080,
+        help="Port for the web server (default: 8080)",
+    )
+    serve_group.add_argument(
+        "--host", default="127.0.0.1",
+        help="Host for the web server (default: 127.0.0.1)",
+    )
+
     # Skill Management (Anthropic protocol)
     skill_group = parser.add_argument_group("Skill Management (Anthropic protocol)")
     skill_group.add_argument(
@@ -2567,6 +2584,20 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Serve command
+    if args.task and args.task == "serve":
+        from agent_cli.serve import serve as _serve
+        _serve(
+            config_dir=args.config_dir,
+            mcp_file=args.mcp_file,
+            auto_yes=args.yes,
+            verbose=args.verbose,
+            host=args.host,
+            port=args.port,
+        )
+        return
+
     agent = AgentCLI(
         config_dir=args.config_dir,
         auto_yes=args.yes,
@@ -2595,9 +2626,6 @@ def main():
                 agent.set_model_config(key, value)
                 print(f"Set {key} = {value}")
         return
-
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
 
     try:
         # one-shot overrides

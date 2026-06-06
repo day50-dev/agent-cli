@@ -1,5 +1,9 @@
-*/*
 .qwen
 .config
 .envrc
 mcp_servers.json
+__pycache__
+dist
+.direnv
+static/
+*egg-info

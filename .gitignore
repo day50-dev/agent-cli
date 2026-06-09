@@ -5,5 +5,4 @@ mcp_servers.json
 __pycache__
 dist
 .direnv
-static/
 *egg-info

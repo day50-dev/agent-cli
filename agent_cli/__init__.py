@@ -2491,6 +2491,11 @@ def main():
                f"  Config directory: {DEFAULT_CONFIG_DIR}\n"
                f"  MCP servers:      {DEFAULT_CONFIG_DIR / 'mcp_servers.json'}\n"
     )
+
+    parser.add_argument(
+        "--version", action="store_true",
+        help="Show version and exit",
+    )
     
     # Task Execution & Pipelines
     task_group = parser.add_argument_group("Task Execution & Pipelines")
@@ -2584,6 +2589,21 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.version:
+        try:
+            from importlib.metadata import version
+            v = version("maxac")
+        except Exception:
+            try:
+                v = subprocess.run(
+                    ["git", "describe", "--tags", "--always"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            except Exception:
+                v = "unknown"
+        print(f"maxac {v}")
+        return
 
     # Serve command
     if args.task and args.task == "serve":

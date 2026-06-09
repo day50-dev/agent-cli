@@ -37,3 +37,6 @@ ac = "agent_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_cli*"]
+
+[tool.setuptools.package-data]
+agent_cli = ["static/*"]

@@ -730,7 +730,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_static(self):
-        static_dir = Path(__file__).resolve().parent.parent / "static"
+        static_dir = Path(__file__).resolve().parent / "static"
         rel_path = self.path.lstrip("/")
         file_path = static_dir / Path(rel_path).name
         if not file_path.exists() or not file_path.is_file():

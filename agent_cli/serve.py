@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import html
 import json
 import os
@@ -116,6 +117,32 @@ _current_run_id: int | None = None
 _current_run_events: list[dict] = []
 _prompt_request = threading.Event()
 _prompt_response = None
+_history_path: Path | None = None
+
+
+def _save_history():
+    global _history
+    if _history_path is None:
+        return
+    try:
+        _history_path.parent.mkdir(parents=True, exist_ok=True)
+        with _history_lock:
+            _history_path.write_text(json.dumps(_history, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def _load_history():
+    global _history
+    if _history_path is None or not _history_path.exists():
+        return
+    try:
+        data = json.loads(_history_path.read_text())
+        if isinstance(data, list):
+            with _history_lock:
+                _history = data
+    except (OSError, json.JSONDecodeError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +355,6 @@ _HTML_PAGE = """\
       <img src="/static/logo_face.avif" class="sidebar-logo" alt="">
       <span class="sidebar-brand">maxac</span>
     </a>
-    <div class="subtitle">history</div>
   </div>
   <div class="history-list" id="history-list">
     <div class="history-empty">No runs yet.</div>
@@ -903,6 +929,7 @@ class _Handler(BaseHTTPRequestHandler):
         }
         with _history_lock:
             _history.insert(0, history_entry)
+        _save_history()
 
         _task_running.set()
         # Broadcast running state
@@ -979,6 +1006,7 @@ def _run_task(task: str, run_id: int):
                 if entry["id"] == run_id:
                     entry["status"] = "done"
                     break
+        _save_history()
         _current_run_id = None
         _current_run_events = None
         # Broadcast idle state
@@ -1010,9 +1038,12 @@ async def _execute_and_stream(task: str):
 
 def serve(config_dir: Path, mcp_file = None, auto_yes: bool = False, verbose: int = 0, host: str = "127.0.0.1", port: int = 8080):
     """Start the web interface server."""
-    global _web_server, _agent, _event_queue, _task_running, _server_ready
+    global _web_server, _agent, _event_queue, _task_running, _server_ready, _history_path
 
     _event_queue = queue.Queue(maxsize=5000)
+
+    _history_path = config_dir / "history.json"
+    _load_history()
 
     _web_output = WebOutput(
         _event_queue,
@@ -1027,7 +1058,17 @@ def serve(config_dir: Path, mcp_file = None, auto_yes: bool = False, verbose: in
     )
     _agent.out = _web_output
 
-    _server = ThreadingHTTPServer((host, port), _Handler)
+    for attempt in range(100):
+        try:
+            _server = ThreadingHTTPServer((host, port), _Handler)
+            break
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                port += 1
+            else:
+                raise
+    else:
+        raise RuntimeError("Could not find an available port after 100 attempts")
     _web_server = _server
 
     print(f"maxac serve — http://{host}:{port}")

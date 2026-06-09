@@ -26,6 +26,22 @@ You describe what you want. `ac` udoes the rest. Skill matching, tool selection,
 
 At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
 
+## Easy start
+
+``shell
+$ uvx maxac serve
+```
+
+And
+
+That
+
+Is
+
+All.
+
+You're done. Your agent is up and running. That's it.
+
 ## Skills
 
 Every successful task is saved as a **skill** — an [Anthropic-compatible](https://agentskills.io) `SKILL.md` + `plan.json` pair under your config directory:

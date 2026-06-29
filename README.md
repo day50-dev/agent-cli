@@ -28,7 +28,7 @@ At default verbosity, you just see the answer. Add `-v` or `-vv` for internals.
 
 ## Easy start
 
-``shell
+```shell
 $ uvx maxac serve
 ```
 
